@@ -1,0 +1,142 @@
+# substance Library
+
+This is a Rust library for analyzing the size composition of binaries by examining their symbols and mapping them back to their originating crates. Originally derived from cargo-bloat but redesigned as a library-first tool.
+
+## Core Architecture
+
+The library provides a clean API through the `BloatAnalyzer` struct with two main methods:
+
+1. `BloatAnalyzer::from_cargo_metadata()` - Creates build context from cargo JSON messages
+2. `BloatAnalyzer::analyze_binary()` - Analyzes a binary file for symbol sizes
+
+## Key Types
+
+- `BuildContext` - Contains crate mappings, target info, and symbol dependencies
+- `AnalysisResult` - Contains parsed symbols, file sizes, and section information
+- `AnalysisConfig` - Configuration for symbol section and std crate splitting
+- `BloatError` - Comprehensive error type for all failure modes
+
+## Binary Format Support
+
+The library supports multiple binary formats through the `binfarce` crate:
+- ELF (32/64-bit) - Linux binaries
+- Mach-O - macOS binaries  
+- PE - Windows binaries
+- PDB - Windows debug symbols
+
+## Symbol to Crate Mapping
+
+The most complex part is mapping symbols back to their originating crates:
+
+1. **Direct mapping** - Uses dependency symbols from .rlib files
+2. **Legacy symbol parsing** - Parses mangled symbol names for crate info
+3. **V0 symbol parsing** - Handles newer Rust symbol mangling
+4. **Fallback handling** - Deals with inlined/unknown symbols
+
+## Important Implementation Details
+
+### Symbol Analysis Process
+1. Memory-map the binary file
+2. Detect binary format (ELF/Mach-O/PE)
+3. Extract symbols from appropriate section (usually .text)
+4. Deduplicate symbols at same address
+5. Map symbols to crates using dependency information
+
+### Crate Name Resolution
+The `crate_name::from_sym()` function is critical - it determines which crate each symbol belongs to. This involves:
+- Checking deps_symbols mapping first (most reliable)
+- Parsing mangled symbol names as fallback
+- Handling edge cases like trait implementations
+- Dealing with std vs custom crate ambiguity
+
+### Standard Library Handling
+- Collects std crates from rustc sysroot automatically
+- Can split std into component crates (core, alloc, etc.) or group as "std"
+- Removes std crates that were explicitly added as dependencies
+
+## Usage Patterns
+
+### Basic Library Usage
+```rust
+// Parse cargo build output
+let context = BloatAnalyzer::from_cargo_metadata(&json_lines, &target_dir, target_triple)?;
+
+// Analyze binary
+let config = AnalysisConfig { symbols_section: None, split_std: false };
+let result = BloatAnalyzer::analyze_binary(&binary_path, &context, &config)?;
+
+// Process results
+for symbol in &result.symbols {
+    let (crate_name, is_exact) = crate_name::from_sym(&context, config.split_std, &symbol.name);
+    // Use symbol.size, crate_name, etc.
+}
+```
+
+### Integration with Cargo
+The library is designed to integrate with `cargo build --message-format=json`:
+1. Run cargo build with JSON output
+2. Parse JSON messages to extract artifacts and metadata
+3. Use library to analyze the resulting binaries
+
+## Error Handling
+
+Common error scenarios:
+- Binary file not found or unreadable
+- Unsupported binary format
+- No build artifacts found
+- rustc/cargo execution failures
+- Symbol parsing errors
+
+## Performance Considerations
+
+- Uses memory mapping for large binary files
+- Deduplicates symbols to avoid double-counting
+- Sorts symbols by address for deduplication efficiency
+- Index-based sorting to avoid cloning large symbol data
+
+## Library-First Design
+
+The substance library is designed as a library-first tool with example applications:
+- Core functionality is in the library with clean API
+- Examples demonstrate both simple and cargo-integrated usage
+- No CLI dependencies or overhead
+- Pure library interface for easy integration
+
+## Extension Points
+
+Future improvements could add:
+- Alternative BuildContext constructors (from target dir, rlib paths)
+- Additional binary analysis without cargo metadata
+- Custom symbol filtering and grouping
+- Different output formats (JSON, etc.)
+
+## Dependencies
+
+Key external dependencies:
+- `binfarce` - Binary format parsing (ELF, Mach-O, PE)
+- `pdb` - Windows PDB debug symbol parsing
+- `memmap2` - Memory-mapped file access
+- `multimap` - Symbol to crate mapping
+- `json` - Cargo output parsing
+
+## Testing
+
+The library includes:
+- Simple binary analysis example (`simple_analysis`)
+- Comprehensive cargo integration example (`analyze_binary`)  
+- Error handling for various failure modes
+
+## Important Notes for LLMs
+
+1. **Symbol parsing is complex** - The crate name resolution logic handles many edge cases
+2. **Binary format support varies** - Not all features work on all platforms
+3. **Cargo integration is key** - The library is designed around cargo's JSON output
+4. **Memory efficiency matters** - Large binaries require careful memory handling
+5. **Error handling is comprehensive** - Many things can go wrong in binary analysis
+
+When helping users with this library, focus on:
+- Proper error handling
+- Understanding the cargo integration workflow
+- Symbol to crate mapping complexities
+- Platform-specific binary format differences
+- Memory and performance considerations for large binaries

@@ -1,13 +1,9 @@
 #![allow(clippy::collapsible_if)]
 #![allow(clippy::collapsible_else_if)]
 
-use std::collections::HashMap;
-use std::convert::TryInto;
 use std::{fmt, fs, path, str};
-use std::ffi::OsStr;
 
 use multimap::MultiMap;
-use json::object;
 use binfarce::ar;
 use binfarce::demangle::SymbolData;
 use binfarce::elf32;

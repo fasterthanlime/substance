@@ -1,25 +1,25 @@
 [package]
-name = "cargo-bloat"
+name = "substance"
 version = "0.12.1"
 authors = ["Yevhenii Reizner <razrfalcon@gmail.com>"]
-description = "Find out what takes most of the space in your executable."
-categories = ["development-tools::cargo-plugins"]
-repository = "https://github.com/RazrFalcon/cargo-bloat"
+description = "Analyze the size composition of binaries by examining symbols and mapping them to crates."
+categories = ["development-tools", "parsing"]
+repository = "https://github.com/fasterthanlime/cargo-bloat-lib"
 readme = "README.md"
 license = "MIT"
 edition = "2018"
 
 [lib]
-name = "cargo_bloat"
+name = "substance"
 path = "src/lib.rs"
 
-[[bin]]
-name = "cargo-bloat"
-path = "src/main.rs"
+[[example]]
+name = "analyze_binary"
+path = "examples/analyze_binary.rs"
 
 [[example]]
-name = "analyze_cargo_build"
-path = "examples/analyze_cargo_build.rs"
+name = "simple_analysis"
+path = "examples/simple_analysis.rs"
 
 [profile.release]
 strip = "debuginfo"
@@ -32,18 +32,3 @@ memmap2 = "0.9"
 multimap = { version = "0.10", default-features = false }
 binfarce = "0.2.1"
 pdb = "0.8.0"
-
-# CLI-only dependencies (optional)
-pico-args = { version = "0.5.0", features = ["eq-separator", "short-space-opt"], optional = true }
-term_size = { version = "0.3.1", optional = true }
-
-[dependencies.regex]
-version = "1.3"
-optional = true
-default-features = false
-features = ["std"]
-
-[features]
-default = ["cli", "regex-filter"]
-cli = ["pico-args", "term_size"]
-regex-filter = ["regex"]

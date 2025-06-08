@@ -1,108 +1,238 @@
-## cargo-bloat
+# substance
 
-Find out what takes most of the space in your executable.
+A Rust library for analyzing the size composition of binaries by examining their symbols and mapping them back to their originating crates.
 
-Supports ELF (Linux, BSD), Mach-O (macOS) and PE (Windows) binaries.
+Supports ELF (Linux, BSD), Mach-O (macOS) and PE (Windows) binaries. Originally derived from cargo-bloat but redesigned as a library.
 
-WASM is not supported. Use [twiggy](https://github.com/rustwasm/twiggy) instead.
+See the original cargo-bloat: <https://github.com/RazrFalcon/cargo-bloat>
 
-Inspired by [google/bloaty](https://github.com/google/bloaty).
+## Features
 
-### Install
+- **Binary format support**: ELF, Mach-O, PE, and PDB debug symbols
+- **Crate mapping**: Maps symbols back to their originating Rust crates
+- **Cargo integration**: Designed to work with `cargo build --message-format=json`
+- **Symbol analysis**: Identifies the largest functions and their sizes
+- **Flexible configuration**: Customizable symbol sections and std library handling
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+substance = "0.12.1"
+```
+
+## Quick Start
+
+```rust
+use substance::{BloatAnalyzer, AnalysisConfig, ArtifactKind};
+use std::process::Command;
+use std::path::PathBuf;
+
+// Run cargo build with JSON output
+let output = Command::new("cargo")
+    .args(["build", "--bin", "my-binary", "--message-format=json"])
+    .output()?;
+
+let stdout = std::str::from_utf8(&output.stdout)?;
+let json_lines: Vec<&str> = stdout.lines().collect();
+
+// Parse cargo metadata
+let context = BloatAnalyzer::from_cargo_metadata(
+    &json_lines,
+    &PathBuf::from("target"),
+    None // auto-detect target triple
+)?;
+
+// Find binary artifact
+let binary_artifact = context.artifacts.iter()
+    .find(|a| a.kind == ArtifactKind::Binary)
+    .unwrap();
+
+// Analyze the binary
+let config = AnalysisConfig {
+    symbols_section: None, // Use default .text section
+    split_std: false,      // Group std crates together
+};
+
+let result = BloatAnalyzer::analyze_binary(
+    &binary_artifact.path,
+    &context,
+    &config,
+)?;
+
+// Access results
+println!("File size: {} bytes", result.file_size);
+println!("Text section: {} bytes", result.text_size);
+println!("Symbol count: {}", result.symbols.len());
+
+// Analyze by crate
+use std::collections::HashMap;
+let mut crate_sizes: HashMap<String, u64> = HashMap::new();
+
+for symbol in &result.symbols {
+    let (crate_name, _is_exact) = substance::crate_name::from_sym(
+        &context,
+        config.split_std,
+        &symbol.name
+    );
+    *crate_sizes.entry(crate_name).or_insert(0) += symbol.size;
+}
+
+// Sort and display biggest crates
+let mut crate_list: Vec<(&String, &u64)> = crate_sizes.iter().collect();
+crate_list.sort_by_key(|(_name, &size)| std::cmp::Reverse(size));
+
+for (crate_name, &size) in crate_list.iter().take(10) {
+    println!("{}: {} bytes", crate_name, size);
+}
+```
+
+## Core API
+
+### Main Types
+
+- **`BloatAnalyzer`** - Main entry point with static analysis methods
+- **`BuildContext`** - Contains crate mappings and target information
+- **`AnalysisResult`** - Analysis results with symbols and size information
+- **`AnalysisConfig`** - Configuration for analysis behavior
+
+### Key Methods
+
+- **`BloatAnalyzer::from_cargo_metadata()`** - Create build context from cargo JSON
+- **`BloatAnalyzer::analyze_binary()`** - Analyze a binary file for symbols
+- **`crate_name::from_sym()`** - Map symbol to originating crate
+
+## Example Usage
+
+The repository includes comprehensive examples:
 
 ```bash
-cargo install cargo-bloat
+# Simple binary analysis without cargo integration
+cargo run --example simple_analysis
+
+# Full cargo integration workflow
+cargo run --example analyze_binary
 ```
 
-or
+These examples demonstrate:
+- Simple binary analysis without cargo integration (`simple_analysis`)
+- Full cargo integration workflow (`analyze_binary`)
+- Parsing cargo metadata from JSON output
+- Analyzing binaries for symbol information
+- Displaying largest symbols and crates
+- Formatting size information
 
-```bash
-cargo install cargo-bloat --no-default-features
+Example output from `simple_analysis`:
+```
+📈 Analyzing binary: target/debug/examples/analyze_binary
+
+📊 Analysis Results:
+─────────────────────
+File size:    2265072 bytes (2.2MiB)
+Text section: 943024 bytes (920.9KiB)
+Text/File:    41.6%
+Symbol count: 3725
+
+🔍 Top 10 Largest Symbols:
+─────────────────────────
+ 1.  27.7KiB (  3.0%) json::parser::Parser::parse
+ 2.   9.7KiB (  1.1%) std::backtrace_rs::symbolize::gimli::resolve
+ 3.   9.2KiB (  1.0%) std::backtrace_rs::symbolize::gimli::Context::new
+ 4.   8.6KiB (  0.9%) analyze_binary::main
+ 5.   7.1KiB (  0.8%) gimli::read::dwarf::Unit<R>::new
+
+📦 Top 10 Biggest Crates:
+─────────────────────────
+ 1. 560.8KiB bytes ( 25.4% file,  60.9% text) std
+ 2.  76.7KiB bytes (  3.5% file,   8.3% text) pdb
+ 3.  76.6KiB bytes (  3.5% file,   8.3% text) binfarce
+ 4.  45.3KiB bytes (  2.0% file,   4.9% text) json
+ 5.  25.5KiB bytes (  1.2% file,   2.8% text) substance
 ```
 
-if you don't need regex filtering using the `--filter` option.
+## Advanced Usage
 
-### Usage
+### Custom Binary Analysis
 
-Get a list of the biggest functions in the release build:
+For analyzing binaries without cargo integration:
 
-```
-% cargo bloat --release -n 10
-Compiling ...
-Analyzing target/release/cargo-bloat
+```rust
+use substance::{BloatAnalyzer, AnalysisConfig, BuildContext};
 
- File  .text     Size       Crate Name
- 0.9%   7.1%  27.0KiB cargo_bloat cargo_bloat::main
- 0.8%   5.7%  21.4KiB cargo_bloat cargo_bloat::process_crate
- 0.3%   2.3%   8.6KiB   [Unknown] read_line_info
- 0.3%   2.1%   7.9KiB         std std::sys::unix::process::process_common::Command::capture_env
- 0.3%   2.1%   7.8KiB        json json::parser::Parser::parse
- 0.2%   1.7%   6.5KiB   [Unknown] elf_add
- 0.2%   1.7%   6.3KiB         std __rdos_backtrace_dwarf_add
- 0.2%   1.3%   5.0KiB         std <rustc_demangle::legacy::Demangle as core::fmt::Display>::fmt
- 0.2%   1.3%   4.9KiB         std std::sys_common::backtrace::_print
- 0.2%   1.3%   4.8KiB         std core::num::flt2dec::strategy::dragon::format_shortest
- 9.8%  73.5% 278.0KiB             And 932 smaller methods. Use -n N to show more.
-13.3% 100.0% 378.0KiB             .text section size, the file size is 2.8MiB
+// Create minimal context for standalone analysis
+let context = BuildContext {
+    target_triple: "x86_64-unknown-linux-gnu".to_string(),
+    artifacts: vec![],
+    std_crates: vec!["std".to_string(), "core".to_string(), "alloc".to_string()],
+    dep_crates: vec![],
+    deps_symbols: Default::default(),
+};
+
+let config = AnalysisConfig::default();
+let result = BloatAnalyzer::analyze_binary(&binary_path, &context, &config)?;
 ```
 
-Get a list of the biggest dependencies in the release build:
-```
-% cargo bloat --release --crates
-Compiling ...
-Analyzing target/release/cargo-bloat
+### Configuration Options
 
- File  .text     Size Crate
- 8.1%  61.2% 231.5KiB std
- 2.5%  19.2%  72.4KiB cargo_bloat
- 1.2%   9.4%  35.5KiB [Unknown]
- 1.0%   7.2%  27.2KiB json
- 0.3%   2.2%   8.5KiB pico_args
- 0.1%   0.4%   1.7KiB multimap
- 0.0%   0.3%   1.1KiB memmap
- 0.0%   0.0%     175B term_size
- 0.0%   0.0%      45B time
-13.3% 100.0% 378.0KiB .text section size, the file size is 2.8MiB
-
-Note: numbers above are a result of guesswork. They are not 100% correct and never will be.
+```rust
+let config = AnalysisConfig {
+    symbols_section: Some(".custom_section".to_string()), // Custom symbol section
+    split_std: true,  // Split std into core/alloc/etc instead of grouping
+};
 ```
 
-Get a list of the biggest functions in the release build filtered by the regexp:
+## Error Handling
 
-**Note**: you have to build `cargo-bloat` with a `regex-filter` feature enabled.
+The library provides comprehensive error handling through `BloatError`:
 
-```
-% cargo bloat --release --filter '^__' -n 10
-Compiling ...
-Analyzing target/release/cargo-bloat
+```rust
+use substance::BloatError;
 
-File .text    Size Crate Name
-0.2%  1.7%  6.3KiB   std __rdos_backtrace_dwarf_add
-0.1%  0.5%  1.9KiB   std __rdos_backtrace_qsort
-0.0%  0.2%    843B   std __udivmodti4
-0.0%  0.1%    296B   std __floattidf
-0.0%  0.1%    290B   std __floattisf
-0.0%  0.1%    284B   std __rdos_backtrace_initialize
-0.0%  0.1%    253B   std __floatuntisf
-0.0%  0.1%    253B   std __floatuntidf
-0.0%  0.1%    211B   std __rdos_backtrace_get_view
-0.0%  0.0%    180B   std __rdos_backtrace_vector_grow
-0.1%  0.7%  2.8KiB       And 37 smaller methods. Use -n N to show more.
-0.5%  3.6% 13.5KiB       filtered data size, the file size is 2.8MiB
+match BloatAnalyzer::analyze_binary(&path, &context, &config) {
+    Ok(result) => { /* process result */ },
+    Err(BloatError::OpenFailed(path)) => {
+        eprintln!("Could not open binary: {}", path.display());
+    },
+    Err(BloatError::UnsupportedFileFormat(path)) => {
+        eprintln!("Unsupported binary format: {}", path.display());
+    },
+    Err(e) => eprintln!("Analysis failed: {}", e),
+}
 ```
 
-Flags specific for `cargo-bloat`:
-```
-    --crates                   Per crate bloatedness
-    --filter <CRATE|REGEXP>    Filter functions by crate
-    --split-std                Split the 'std' crate to original crates like core, alloc, etc.
-    --no-relative-size         Hide 'File' and '.text' columns
-    --full-fn                  Print full function name with hash values
--n <NUM>                       Number of lines to show, 0 to show all [default: 20]
--w, --wide                     Do not trim long function names
-    --message-format <FMT>     Output format [default: table] [possible values: table, json]
-```
+## Platform Support
 
-### License
+- **Linux**: Full ELF support (32/64-bit)
+- **macOS**: Full Mach-O support
+- **Windows**: PE support with PDB debug symbols
+- **Other Unix**: Basic ELF support
 
-*cargo-bloat* is licensed under the MIT license.
+## Performance Notes
+
+- Uses memory mapping for efficient large file access
+- Deduplicates symbols to avoid double-counting
+- Index-based sorting to minimize memory allocation
+- Optimized for binaries up to several hundred MB
+
+## Dependencies
+
+- `binfarce` - Binary format parsing
+- `pdb` - Windows debug symbol support
+- `memmap2` - Memory-mapped file access
+- `json` - Cargo output parsing
+- `multimap` - Symbol to crate mapping
+
+## Contributing
+
+This library focuses on accurate binary analysis and clean API design. Contributions should maintain:
+
+- Zero-copy parsing where possible
+- Comprehensive error handling
+- Cross-platform compatibility
+- Clean separation between parsing and analysis
+
+## License
+
+Licensed under the MIT license.
