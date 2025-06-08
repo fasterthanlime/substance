@@ -26,7 +26,8 @@ lto = "thin"
 
 [dependencies]
 # Core library dependencies
-json = "0.12"
+facet = "0.27"
+facet-json = "0.24"
 memmap2 = "0.9"
 multimap = { version = "0.10", default-features = false }
 binfarce = "0.2.1"
