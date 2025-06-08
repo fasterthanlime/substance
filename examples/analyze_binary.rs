@@ -16,6 +16,59 @@ use substance::{BloatAnalyzer, AnalysisConfig, ArtifactKind};
 use std::collections::HashMap;
 use std::process::Command;
 use std::path::PathBuf;
+use std::fs;
+
+#[derive(Debug)]
+struct TimingInfo {
+    package_id: String,
+    crate_name: String,
+    duration: f64,
+    rmeta_time: Option<f64>,
+    mode: String,
+}
+
+#[derive(Debug, facet::Facet)]
+#[facet(name = "timing_message")]
+struct TimingMessage {
+    reason: String,
+    package_id: String,
+    target: Target,
+    mode: String,
+    duration: f64,
+    rmeta_time: Option<f64>,
+}
+
+#[derive(Debug, facet::Facet)]
+#[facet(name = "target")]
+struct Target {
+    kind: Vec<String>,
+    crate_types: Vec<String>,
+    name: String,
+    src_path: String,
+    edition: String,
+    doc: bool,
+    doctest: bool,
+    test: bool,
+}
+
+impl TimingInfo {
+    fn parse_from_json_line(line: &str) -> Option<Self> {
+        // Only parse timing-info messages
+        if !line.contains(r#""reason":"timing-info""#) {
+            return None;
+        }
+        
+        let timing_msg: TimingMessage = facet_json::from_str(line).ok()?;
+        
+        Some(TimingInfo {
+            package_id: timing_msg.package_id,
+            crate_name: timing_msg.target.name,
+            duration: timing_msg.duration,
+            rmeta_time: timing_msg.rmeta_time,
+            mode: timing_msg.mode,
+        })
+    }
+}
 
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
@@ -42,13 +95,52 @@ fn is_std_function(func_name: &str) -> bool {
     std_prefixes.iter().any(|prefix| func_name.starts_with(prefix))
 }
 
+struct CleanupGuard {
+    temp_dir: PathBuf,
+}
+
+impl CleanupGuard {
+    fn new(temp_dir: &PathBuf) -> Self {
+        Self {
+            temp_dir: temp_dir.clone(),
+        }
+    }
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        if self.temp_dir.exists() {
+            if let Err(e) = fs::remove_dir_all(&self.temp_dir) {
+                eprintln!("⚠️ Failed to cleanup temporary directory {}: {}", self.temp_dir.display(), e);
+            } else {
+                println!("🧹 Cleaned up temporary directory: {}", self.temp_dir.display());
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔨 Building project with JSON output...");
+    // Create a temporary target directory for fresh timing measurements
+    let temp_target_dir = std::env::temp_dir().join(format!("substance_timing_{}", std::process::id()));
+    println!("🔨 Building project with JSON output in temporary directory...");
+    println!("📁 Using target dir: {}", temp_target_dir.display());
     
-    // Step 1: Run cargo build with JSON output for examples and LLVM IR emission
+    // Ensure cleanup happens even on early return
+    let _cleanup_guard = CleanupGuard::new(&temp_target_dir);
+    
+    // Step 1: Run cargo build with JSON output for examples, LLVM IR emission, and timing data
     let output = Command::new("cargo")
-        .args(["build", "--examples", "--message-format=json"])
+        .args([
+            "build", 
+            "--examples", 
+            "--message-format=json", 
+            "-Z", "unstable-options", 
+            "--timings=json",
+            "--target-dir"
+        ])
+        .arg(&temp_target_dir)
         .env("RUSTFLAGS", "--emit=llvm-ir")
+        .env("RUSTC_BOOTSTRAP", "1")
         .output()?;
 
     if !output.status.success() {
@@ -63,11 +155,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✅ Build completed successfully");
     
-    // Step 2: Parse cargo metadata using the library
+    // Step 2: Parse timing data
+    println!("⏱️  Parsing timing data...");
+    let mut timing_data: Vec<TimingInfo> = Vec::new();
+    for line in &json_lines {
+        if let Some(timing) = TimingInfo::parse_from_json_line(line) {
+            timing_data.push(timing);
+        }
+    }
+    
+    println!("Found {} crates with timing data", timing_data.len());
+    
+    // Step 3: Parse cargo metadata using the library
     println!("📊 Parsing cargo metadata...");
     let context = BloatAnalyzer::from_cargo_metadata(
         &json_lines,
-        &PathBuf::from("target"),
+        &temp_target_dir,
         None // auto-detect target triple
     )?;
 
@@ -88,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         symbols_section: None, // Use default .text section
         split_std: false,      // Group std crates together
         analyze_llvm_ir: true, // Also analyze LLVM IR files
-        target_dir: None,      // Use default "target" directory
+        target_dir: Some(temp_target_dir.clone()), // Use our temporary target directory
     };
 
     let result = BloatAnalyzer::analyze_binary(
@@ -221,6 +324,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         println!("\n💡 Tip: Add RUSTFLAGS='--emit=llvm-ir' when building to get LLVM IR analysis");
+    }
+
+    // Show timing data analysis
+    if !timing_data.is_empty() {
+        println!("\n⏱️  Crate Build Timing Analysis:");
+        println!("─────────────────────────────");
+        
+        // Sort by duration (longest first)
+        timing_data.sort_by(|a, b| b.duration.partial_cmp(&a.duration).unwrap());
+        
+        let total_time: f64 = timing_data.iter().map(|t| t.duration).sum();
+        println!("Total build time: {:.3}s", total_time);
+        
+        println!("\n🐌 Top 10 Slowest Crates to Build:");
+        println!("──────────────────────────────────");
+        for (rank, timing) in timing_data.iter().take(10).enumerate() {
+            let percent = timing.duration / total_time * 100.0;
+            let rmeta_info = if let Some(rmeta_time) = timing.rmeta_time {
+                format!(" (rmeta: {:.3}s)", rmeta_time)
+            } else {
+                String::new()
+            };
+            println!("{:2}. {:>6.3}s ({:>5.1}%) {}{}", 
+                     rank + 1,
+                     timing.duration,
+                     percent,
+                     timing.crate_name,
+                     rmeta_info);
+        }
+        
+        if timing_data.len() > 10 {
+            let remaining_time: f64 = timing_data.iter().skip(10).map(|t| t.duration).sum();
+            println!("    ... and {} more crates ({:.3}s total)", 
+                     timing_data.len() - 10, remaining_time);
+        }
+    } else {
+        println!("\n💡 Tip: Use RUSTC_BOOTSTRAP=1 cargo build -Z unstable-options --timings=json to get timing data");
     }
 
     println!("\n✨ Analysis complete!");

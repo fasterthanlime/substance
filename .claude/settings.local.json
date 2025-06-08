@@ -8,7 +8,9 @@
       "Bash(cargo build:*)",
       "WebFetch(domain:docs.rs)",
       "Bash(cargo test:*)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(RUSTC_BOOTSTRAP=1 cargo build --timings=json --message-format=json 2 > /dev/null)",
+      "Bash(cargo clean:*)"
     ],
     "deny": []
   }
