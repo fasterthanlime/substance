@@ -15,6 +15,7 @@ use facet::Facet;
 use multimap::MultiMap;
 
 pub mod crate_name;
+pub mod llvm_ir;
 
 // Cargo JSON metadata structures
 #[derive(Debug, Facet)]
@@ -66,6 +67,10 @@ pub enum ArtifactKind {
 pub struct AnalysisConfig {
     pub symbols_section: Option<String>,
     pub split_std: bool,
+    /// Whether to also analyze LLVM IR files (requires --emit=llvm-ir during build)
+    pub analyze_llvm_ir: bool,
+    /// Optional target directory to search for .ll files (defaults to "target")
+    pub target_dir: Option<std::path::PathBuf>,
 }
 
 pub struct AnalysisResult {
@@ -73,6 +78,20 @@ pub struct AnalysisResult {
     pub text_size: u64,
     pub symbols: Vec<SymbolData>,
     pub section_name: Option<String>,
+    /// LLVM IR analysis data (only present if LLVM IR files were analyzed)
+    pub llvm_ir_data: Option<LlvmIrAnalysis>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlvmIrAnalysis {
+    /// Function instantiation data keyed by demangled function name
+    pub instantiations: std::collections::HashMap<String, crate::llvm_ir::LlvmInstantiations>,
+    /// Total LLVM IR lines across all functions
+    pub total_lines: usize,
+    /// Total number of function instantiations
+    pub total_copies: usize,
+    /// Paths to .ll files that were analyzed
+    pub analyzed_files: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -282,7 +301,27 @@ impl BloatAnalyzer {
         config: &AnalysisConfig,
     ) -> Result<AnalysisResult, BloatError> {
         let section_name = config.symbols_section.as_deref().unwrap_or(".text");
-        collect_self_data(binary_path, section_name)
+        let mut result = collect_self_data(binary_path, section_name)?;
+        
+        // Optionally add LLVM IR analysis
+        if config.analyze_llvm_ir {
+            let target_dir = config.target_dir.as_deref().unwrap_or(path::Path::new("target"));
+            let crate_name = binary_path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.split('-').next().unwrap_or(s));
+            
+            match Self::analyze_llvm_ir_from_target_dir(target_dir, crate_name) {
+                Ok(llvm_analysis) => {
+                    result.llvm_ir_data = Some(llvm_analysis);
+                }
+                Err(_) => {
+                    // Don't fail the entire analysis if LLVM IR is not available
+                    // This allows graceful degradation
+                }
+            }
+        }
+        
+        Ok(result)
     }
 
     pub fn analyze_binary_simple(
@@ -290,6 +329,54 @@ impl BloatAnalyzer {
         _config: &AnalysisConfig,
     ) -> Result<AnalysisResult, BloatError> {
         todo!("Will be implemented later")
+    }
+
+    /// Analyze LLVM IR files in the target directory
+    pub fn analyze_llvm_ir_from_target_dir(
+        target_dir: &path::Path,
+        crate_name: Option<&str>,
+    ) -> Result<LlvmIrAnalysis, BloatError> {
+        let ll_files = find_llvm_ir_files(target_dir, crate_name)?;
+        
+        if ll_files.is_empty() {
+            return Err(BloatError::CargoError(
+                "No LLVM IR files found. Make sure to build with RUSTFLAGS='--emit=llvm-ir'".to_string()
+            ));
+        }
+
+        let mut combined_instantiations = std::collections::HashMap::new();
+        let mut total_lines = 0;
+        let mut total_copies = 0;
+
+        for ll_file in &ll_files {
+            let data = std::fs::read(ll_file).map_err(|_| BloatError::OpenFailed(ll_file.clone()))?;
+            let instantiations = crate::llvm_ir::analyze_llvm_ir_data(&data);
+            
+            for (func_name, stats) in instantiations {
+                let entry = combined_instantiations
+                    .entry(func_name)
+                    .or_insert_with(crate::llvm_ir::LlvmInstantiations::default);
+                entry.copies += stats.copies;
+                entry.total_lines += stats.total_lines;
+                total_lines += stats.total_lines;
+                total_copies += stats.copies;
+            }
+        }
+
+        Ok(LlvmIrAnalysis {
+            instantiations: combined_instantiations,
+            total_lines,
+            total_copies,
+            analyzed_files: ll_files,
+        })
+    }
+
+    /// Analyze a single LLVM IR file
+    pub fn analyze_llvm_ir_file(
+        ll_file_path: &path::Path,
+    ) -> Result<std::collections::HashMap<String, crate::llvm_ir::LlvmInstantiations>, BloatError> {
+        let data = std::fs::read(ll_file_path).map_err(|_| BloatError::OpenFailed(ll_file_path.to_owned()))?;
+        Ok(crate::llvm_ir::analyze_llvm_ir_data(&data))
     }
 }
 
@@ -371,6 +458,7 @@ fn collect_elf_data(
         file_size: 0,
         text_size,
         section_name: Some(section_name.to_owned()),
+        llvm_ir_data: None,
     };
 
     Ok(d)
@@ -383,6 +471,7 @@ fn collect_macho_data(data: &[u8]) -> Result<AnalysisResult, BloatError> {
         file_size: 0,
         text_size,
         section_name: None,
+        llvm_ir_data: None,
     };
 
     Ok(d)
@@ -413,6 +502,7 @@ fn collect_pe_data(path: &path::Path, data: &[u8]) -> Result<AnalysisResult, Blo
             file_size: 0,
             text_size,
             section_name: None,
+            llvm_ir_data: None,
         })
     }
 }
@@ -542,6 +632,7 @@ fn collect_pdb_data(pdb_path: &path::Path, text_size: u64) -> Result<AnalysisRes
         file_size: 0,
         text_size,
         section_name: None,
+        llvm_ir_data: None,
     };
 
     Ok(d)
@@ -645,4 +736,58 @@ fn get_default_target() -> Result<String, BloatError> {
     }
 
     Err(BloatError::RustcFailed)
+}
+
+/// Find LLVM IR (.ll) files in the target directory
+fn find_llvm_ir_files(target_dir: &path::Path, crate_name: Option<&str>) -> Result<Vec<path::PathBuf>, BloatError> {
+    let mut ll_files = Vec::new();
+    
+    // Search in multiple potential locations within target directory
+    let search_dirs = vec![
+        target_dir.join("debug"),
+        target_dir.join("debug").join("deps"),
+        target_dir.join("debug").join("examples"),
+        target_dir.join("debug").join("incremental"),
+    ];
+    
+    for search_dir in search_dirs {
+        if search_dir.exists() {
+            find_ll_files_in_dir(&search_dir, crate_name, &mut ll_files)?;
+        }
+    }
+    
+    Ok(ll_files)
+}
+
+fn find_ll_files_in_dir(
+    dir: &path::Path, 
+    crate_name: Option<&str>, 
+    ll_files: &mut Vec<path::PathBuf>
+) -> Result<(), BloatError> {
+    let entries = fs::read_dir(dir).map_err(|_| BloatError::OpenFailed(dir.to_owned()))?;
+    
+    for entry in entries.flatten() {
+        let path = entry.path();
+        
+        if path.is_dir() {
+            // Recursively search subdirectories (like incremental compilation dirs)
+            find_ll_files_in_dir(&path, crate_name, ll_files)?;
+        } else if let Some(extension) = path.extension() {
+            if extension == "ll" {
+                // If crate_name is specified, filter by it
+                if let Some(name) = crate_name {
+                    if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        if file_stem.starts_with(name) || file_stem.contains(&format!("-{}", name)) {
+                            ll_files.push(path);
+                        }
+                    }
+                } else {
+                    // Include all .ll files if no crate name specified
+                    ll_files.push(path);
+                }
+            }
+        }
+    }
+    
+    Ok(())
 }

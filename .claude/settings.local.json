@@ -6,7 +6,9 @@
       "Bash(grep:*)",
       "Bash(sed:*)",
       "Bash(cargo build:*)",
-      "WebFetch(domain:docs.rs)"
+      "WebFetch(domain:docs.rs)",
+      "Bash(cargo test:*)",
+      "WebFetch(domain:github.com)"
     ],
     "deny": []
   }

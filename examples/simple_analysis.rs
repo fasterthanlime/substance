@@ -56,6 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AnalysisConfig {
         symbols_section: None, // Use default .text section
         split_std: false,      // Group std crates together
+        analyze_llvm_ir: false, // Don't analyze LLVM IR in this simple example
+        target_dir: None,      // Use default target directory
     };
     
     let result = BloatAnalyzer::analyze_binary(&path, &context, &config)?;

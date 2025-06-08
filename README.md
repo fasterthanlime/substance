@@ -12,6 +12,7 @@ See the original cargo-bloat: <https://github.com/RazrFalcon/cargo-bloat>
 - **Crate mapping**: Maps symbols back to their originating Rust crates
 - **Cargo integration**: Designed to work with `cargo build --message-format=json`
 - **Symbol analysis**: Identifies the largest functions and their sizes
+- **LLVM IR analysis**: Analyzes compilation complexity by counting LLVM instruction lines (inspired by [cargo-llvm-lines](https://github.com/dtolnay/cargo-llvm-lines))
 - **Flexible configuration**: Customizable symbol sections and std library handling
 
 ## Installation
@@ -54,6 +55,8 @@ let binary_artifact = context.artifacts.iter()
 let config = AnalysisConfig {
     symbols_section: None, // Use default .text section
     split_std: false,      // Group std crates together
+    analyze_llvm_ir: true, // Also analyze LLVM IR (requires --emit=llvm-ir)
+    target_dir: None,      // Use default "target" directory
 };
 
 let result = BloatAnalyzer::analyze_binary(
@@ -66,6 +69,12 @@ let result = BloatAnalyzer::analyze_binary(
 println!("File size: {} bytes", result.file_size);
 println!("Text section: {} bytes", result.text_size);
 println!("Symbol count: {}", result.symbols.len());
+
+// Access LLVM IR analysis if available
+if let Some(llvm_analysis) = &result.llvm_ir_data {
+    println!("Total LLVM IR lines: {}", llvm_analysis.total_lines);
+    println!("Function instantiations: {}", llvm_analysis.total_copies);
+}
 
 // Analyze by crate
 use std::collections::HashMap;
@@ -179,9 +188,32 @@ let result = BloatAnalyzer::analyze_binary(&binary_path, &context, &config)?;
 ```rust
 let config = AnalysisConfig {
     symbols_section: Some(".custom_section".to_string()), // Custom symbol section
-    split_std: true,  // Split std into core/alloc/etc instead of grouping
+    split_std: true,           // Split std into core/alloc/etc instead of grouping
+    analyze_llvm_ir: true,     // Enable LLVM IR analysis for compilation complexity
+    target_dir: Some(PathBuf::from("custom_target")), // Custom target directory
 };
 ```
+
+### LLVM IR Analysis
+
+To enable LLVM IR analysis for understanding compilation complexity:
+
+```bash
+# Build with LLVM IR emission
+RUSTFLAGS="--emit=llvm-ir" cargo build
+
+# Then analyze with LLVM IR enabled
+let config = AnalysisConfig {
+    analyze_llvm_ir: true,
+    ..Default::default()
+};
+```
+
+This provides additional insights into:
+- Generic function instantiation costs
+- Compilation complexity per function
+- LLVM IR instruction counts
+- Monomorphization impact
 
 ## Error Handling
 
@@ -232,6 +264,11 @@ This library focuses on accurate binary analysis and clean API design. Contribut
 - Comprehensive error handling
 - Cross-platform compatibility
 - Clean separation between parsing and analysis
+
+## Attribution
+
+- **Binary analysis**: Originally derived from [cargo-bloat](https://github.com/RazrFalcon/cargo-bloat) by RazrFalcon
+- **LLVM IR analysis**: Inspired by [cargo-llvm-lines](https://github.com/dtolnay/cargo-llvm-lines) by dtolnay, which was originally suggested by @eddyb for debugging compiler memory usage and compile times
 
 ## License
 
