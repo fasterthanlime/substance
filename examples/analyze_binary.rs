@@ -30,12 +30,25 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn is_std_function(func_name: &str) -> bool {
+    // Filter out standard library and common low-level functions
+    let std_prefixes = [
+        "std::", "core::", "alloc::", 
+        "hashbrown::", "gimli::", "addr2line::", 
+        "memchr::", "adler2::", "miniz_oxide::",
+        "object::", "rustc_demangle::",
+    ];
+    
+    std_prefixes.iter().any(|prefix| func_name.starts_with(prefix))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔨 Building project with JSON output...");
     
-    // Step 1: Run cargo build with JSON output for examples
+    // Step 1: Run cargo build with JSON output for examples and LLVM IR emission
     let output = Command::new("cargo")
         .args(["build", "--examples", "--message-format=json"])
+        .env("RUSTFLAGS", "--emit=llvm-ir")
         .output()?;
 
     if !output.status.success() {
@@ -74,6 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AnalysisConfig {
         symbols_section: None, // Use default .text section
         split_std: false,      // Group std crates together
+        analyze_llvm_ir: true, // Also analyze LLVM IR files
+        target_dir: None,      // Use default "target" directory
     };
 
     let result = BloatAnalyzer::analyze_binary(
@@ -171,6 +186,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if context.std_crates.len() > 10 {
             println!("    ... and {} more", context.std_crates.len() - 10);
         }
+    }
+
+    // Show LLVM IR analysis if available
+    if let Some(llvm_analysis) = &result.llvm_ir_data {
+        println!("\n🔥 LLVM IR Analysis:");
+        println!("───────────────────");
+        println!("Total LLVM IR lines: {}", llvm_analysis.total_lines);
+        println!("Total instantiations: {}", llvm_analysis.total_copies);
+        println!("Analyzed {} .ll files", llvm_analysis.analyzed_files.len());
+        
+        // Show top 10 most complex non-std functions by LLVM IR lines
+        let mut functions: Vec<(&String, &substance::llvm_ir::LlvmInstantiations)> = 
+            llvm_analysis.instantiations.iter()
+                .filter(|(func_name, _)| !is_std_function(func_name))
+                .collect();
+        functions.sort_by_key(|(_, stats)| std::cmp::Reverse(stats.total_lines));
+        
+        println!("\n🔍 Top 10 Most Complex User/Dependency Functions (LLVM IR):");
+        println!("─────────────────────────────────────────────────────────");
+        for (rank, (func_name, stats)) in functions.iter().take(10).enumerate() {
+            let percent = stats.total_lines as f64 / llvm_analysis.total_lines as f64 * 100.0;
+            println!("{:2}. {:>6} lines ({:>5.1}%) {} instantiations: {}", 
+                     rank + 1,
+                     stats.total_lines,
+                     percent,
+                     stats.copies,
+                     func_name);
+        }
+        
+        if functions.len() < 10 {
+            println!("    (Filtered out {} std library functions)", 
+                     llvm_analysis.instantiations.len() - functions.len());
+        }
+    } else {
+        println!("\n💡 Tip: Add RUSTFLAGS='--emit=llvm-ir' when building to get LLVM IR analysis");
     }
 
     println!("\n✨ Analysis complete!");
