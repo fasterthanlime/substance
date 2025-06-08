@@ -13,16 +13,8 @@ See the original cargo-bloat: <https://github.com/RazrFalcon/cargo-bloat>
 - **Cargo integration**: Designed to work with `cargo build --message-format=json`
 - **Symbol analysis**: Identifies the largest functions and their sizes
 - **LLVM IR analysis**: Analyzes compilation complexity by counting LLVM instruction lines (inspired by [cargo-llvm-lines](https://github.com/dtolnay/cargo-llvm-lines))
+- **Build timing analysis**: Parses cargo's `--timings=json` output to measure crate build performance
 - **Flexible configuration**: Customizable symbol sections and std library handling
-
-## Installation
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-substance = "0.12.1"
-```
 
 ## Quick Start
 
@@ -121,7 +113,7 @@ The repository includes comprehensive examples:
 # Simple binary analysis without cargo integration
 cargo run --example simple_analysis
 
-# Full cargo integration workflow
+# Full cargo integration workflow with timing analysis
 cargo run --example analyze_binary
 ```
 
@@ -129,36 +121,48 @@ These examples demonstrate:
 - Simple binary analysis without cargo integration (`simple_analysis`)
 - Full cargo integration workflow (`analyze_binary`)
 - Parsing cargo metadata from JSON output
+- **Build timing analysis** from cargo's `--timings=json` output
 - Analyzing binaries for symbol information
 - Displaying largest symbols and crates
+- **LLVM IR complexity analysis** when built with `--emit=llvm-ir`
 - Formatting size information
 
-Example output from `simple_analysis`:
+Example output from `analyze_binary` (includes timing analysis):
 ```
-📈 Analyzing binary: target/debug/examples/analyze_binary
-
 📊 Analysis Results:
 ─────────────────────
-File size:    2265072 bytes (2.2MiB)
-Text section: 943024 bytes (920.9KiB)
-Text/File:    41.6%
-Symbol count: 3725
+File size:    4538720 bytes (4.3MiB)
+Text section: 1684152 bytes (1.6MiB)
+Text/File:    37.1%
+Symbol count: 8935
 
 🔍 Top 10 Largest Symbols:
 ─────────────────────────
- 1.  27.7KiB (  3.0%) json::parser::Parser::parse
- 2.   9.7KiB (  1.1%) std::backtrace_rs::symbolize::gimli::resolve
- 3.   9.2KiB (  1.0%) std::backtrace_rs::symbolize::gimli::Context::new
- 4.   8.6KiB (  0.9%) analyze_binary::main
- 5.   7.1KiB (  0.8%) gimli::read::dwarf::Unit<R>::new
+ 1.  21.6KiB (  1.3%) ariadne::write::<impl ariadne::Report<S>>::write_for_stream
+ 2.  16.6KiB (  1.0%) facet_deserialize::StackRunner<C,I>::pop
+ 3.  14.6KiB (  0.9%) analyze_binary::main
+ 4.  12.3KiB (  0.7%) facet_deserialize::StackRunner<C,I>::object_key_or_object_close
+ 5.  10.7KiB (  0.7%) facet_deserialize::StackRunner<C,I>::value
 
 📦 Top 10 Biggest Crates:
 ─────────────────────────
- 1. 560.8KiB bytes ( 25.4% file,  60.9% text) std
- 2.  76.7KiB bytes (  3.5% file,   8.3% text) pdb
- 3.  76.6KiB bytes (  3.5% file,   8.3% text) binfarce
- 4.  45.3KiB bytes (  2.0% file,   4.9% text) json
- 5.  25.5KiB bytes (  1.2% file,   2.8% text) substance
+ 1. 594.5KiB bytes ( 13.4% file,  36.1% text) std
+ 2. 361.0KiB bytes (  8.1% file,  21.9% text) substance
+ 3. 196.4KiB bytes (  4.4% file,  11.9% text) facet_deserialize
+ 4. 154.8KiB bytes (  3.5% file,   9.4% text) binfarce
+ 5. 118.7KiB bytes (  2.7% file,   7.2% text) pdb
+
+⏱️  Crate Build Timing Analysis:
+─────────────────────────────
+Total build time: 7.449s
+
+🐌 Top 10 Slowest Crates to Build:
+──────────────────────────────────
+ 1.  0.998s ( 13.4%) facet_core (rmeta: 0.771s)
+ 2.  0.729s (  9.8%) pdb (rmeta: 0.424s)
+ 3.  0.663s (  8.9%) substance (rmeta: 0.202s)
+ 4.  0.456s (  6.1%) facet_deserialize (rmeta: 0.187s)
+ 5.  0.368s (  4.9%) binfarce (rmeta: 0.159s)
 ```
 
 ## Advanced Usage
@@ -214,6 +218,25 @@ This provides additional insights into:
 - Compilation complexity per function
 - LLVM IR instruction counts
 - Monomorphization impact
+
+### Build Timing Analysis
+
+To enable build timing analysis for understanding compilation performance:
+
+```bash
+# Build with timing data collection
+RUSTC_BOOTSTRAP=1 cargo build -Z unstable-options --timings=json --message-format=json
+
+# Then parse timing data in your analysis (see analyze_binary example)
+```
+
+The `analyze_binary` example demonstrates how to:
+- Parse cargo's `--timings=json` output alongside binary analysis
+- Identify the slowest crates to compile
+- Measure total build time and individual crate build percentages
+- Show rmeta generation time vs full compilation time
+
+This helps identify build performance bottlenecks and understand which dependencies contribute most to compile times.
 
 ## Error Handling
 
