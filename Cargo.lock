@@ -60,7 +60,7 @@ checksum = "04c565b551bafbef4157586fa379538366e4385d42082f255bfd96e4fe8519da"
 
 [[package]]
 name = "substance"
-version = "0.12.1"
+version = "0.1.0"
 dependencies = [
  "binfarce",
  "json",

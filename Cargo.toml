@@ -1,10 +1,9 @@
 [package]
 name = "substance"
-version = "0.12.1"
-authors = ["Yevhenii Reizner <razrfalcon@gmail.com>"]
+version = "0.1.0"
 description = "Analyze the size composition of binaries by examining symbols and mapping them to crates."
 categories = ["development-tools", "parsing"]
-repository = "https://github.com/fasterthanlime/cargo-bloat-lib"
+repository = "https://github.com/fasterthanlime/substance"
 readme = "README.md"
 license = "MIT"
 edition = "2018"
