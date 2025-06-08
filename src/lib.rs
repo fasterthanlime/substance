@@ -11,9 +11,26 @@ use binfarce::macho;
 use binfarce::pe;
 use binfarce::ByteOrder;
 use binfarce::Format;
+use facet::Facet;
 use multimap::MultiMap;
 
 pub mod crate_name;
+
+// Cargo JSON metadata structures
+#[derive(Debug, Facet)]
+struct CargoMessage {
+    reason: Option<String>,
+    #[facet(default)]
+    target: Option<CargoTarget>,
+    #[facet(default)]
+    filenames: Option<Vec<String>>,
+}
+
+#[derive(Debug, Facet)]
+struct CargoTarget {
+    name: Option<String>,
+    crate_types: Option<Vec<String>>,
+}
 
 // Re-export important types
 pub use binfarce::demangle::SymbolData as BinarySymbol;
@@ -180,24 +197,36 @@ impl BloatAnalyzer {
         // Parse cargo JSON messages to extract artifacts
         let mut artifacts = Vec::new();
         for line in json_messages {
-            let build = json::parse(line).map_err(|_| BloatError::InvalidCargoOutput)?;
-            if let Some(target_name) = build["target"]["name"].as_str() {
-                if !build["filenames"].is_null() {
-                    let filenames = build["filenames"].members();
-                    let crate_types = build["target"]["crate_types"].members();
-                    for (path, crate_type) in filenames.zip(crate_types) {
-                        let kind = match crate_type.as_str().unwrap() {
-                            "bin" => ArtifactKind::Binary,
-                            "lib" | "rlib" => ArtifactKind::Library,
-                            "dylib" | "cdylib" => ArtifactKind::DynLib,
-                            _ => continue, // Simply ignore.
-                        };
+            let build: CargoMessage = facet_json::from_str(line).map_err(|e| {
+                eprintln!("Failed to parse JSON line: {}", line);
+                eprintln!("Error: {:?}", e);
+                BloatError::InvalidCargoOutput
+            })?;
 
-                        artifacts.push(Artifact {
-                            kind,
-                            name: target_name.replace('-', "_"),
-                            path: path::PathBuf::from(path.as_str().unwrap()),
-                        });
+            // Only process compiler-artifact messages
+            if build.reason.as_deref() != Some("compiler-artifact") {
+                continue;
+            }
+
+            if let Some(target) = &build.target {
+                if let Some(target_name) = &target.name {
+                    if let (Some(filenames), Some(crate_types)) =
+                        (&build.filenames, &target.crate_types)
+                    {
+                        for (path, crate_type) in filenames.iter().zip(crate_types.iter()) {
+                            let kind = match crate_type.as_str() {
+                                "bin" => ArtifactKind::Binary,
+                                "lib" | "rlib" => ArtifactKind::Library,
+                                "dylib" | "cdylib" => ArtifactKind::DynLib,
+                                _ => continue, // Simply ignore.
+                            };
+
+                            artifacts.push(Artifact {
+                                kind,
+                                name: target_name.replace('-', "_"),
+                                path: path::PathBuf::from(path),
+                            });
+                        }
                     }
                 }
             }
