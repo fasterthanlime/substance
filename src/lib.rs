@@ -3,7 +3,6 @@
 
 use std::{fmt, fs, path, str};
 
-use multimap::MultiMap;
 use binfarce::ar;
 use binfarce::demangle::SymbolData;
 use binfarce::elf32;
@@ -12,6 +11,7 @@ use binfarce::macho;
 use binfarce::pe;
 use binfarce::ByteOrder;
 use binfarce::Format;
+use multimap::MultiMap;
 
 pub mod crate_name;
 
@@ -314,7 +314,11 @@ fn collect_self_data(path: &path::Path, section_name: &str) -> Result<AnalysisRe
     Ok(d)
 }
 
-fn collect_elf_data(path: &path::Path, data: &[u8], section_name: &str) -> Result<AnalysisResult, BloatError> {
+fn collect_elf_data(
+    path: &path::Path,
+    data: &[u8],
+    section_name: &str,
+) -> Result<AnalysisResult, BloatError> {
     let is_64_bit = match data[4] {
         1 => false,
         2 => true,
@@ -558,7 +562,7 @@ fn collect_rlib_paths(deps_dir: &path::Path) -> Vec<(String, path::PathBuf)> {
 
 fn stdlibs_dir(target_triple: &str) -> Result<path::PathBuf, BloatError> {
     use std::process::Command;
-    
+
     // Support xargo by applying the rustflags
     // This is meant to match how cargo handles the RUSTFLAG environment
     // variable.
@@ -598,7 +602,7 @@ fn stdlibs_dir(target_triple: &str) -> Result<path::PathBuf, BloatError> {
 
 fn get_default_target() -> Result<String, BloatError> {
     use std::process::Command;
-    
+
     let output = Command::new("rustc")
         .arg("-Vv")
         .output()
@@ -612,22 +616,4 @@ fn get_default_target() -> Result<String, BloatError> {
     }
 
     Err(BloatError::RustcFailed)
-}
-
-// Utility functions that will be moved from main.rs
-pub fn filter_methods(
-    _result: &AnalysisResult,
-    _filter: Option<&str>,
-    _limit: Option<usize>,
-    _split_std: bool,
-) -> Vec<Method> {
-    todo!("Will be implemented when moving functions")
-}
-
-pub fn filter_crates(
-    _result: &AnalysisResult,
-    _limit: Option<usize>,
-    _split_std: bool,
-) -> Vec<Crate> {
-    todo!("Will be implemented when moving functions")
 }
