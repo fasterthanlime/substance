@@ -4,142 +4,48 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::process::{self, Command};
-use std::{fmt, fs, path, str};
-use std::ffi::OsStr;
-
-use multimap::MultiMap;
+use std::{path, str};
 
 use json::object;
 
-use binfarce::ar;
-use binfarce::demangle::SymbolData;
-use binfarce::elf32;
-use binfarce::elf64;
-use binfarce::macho;
-use binfarce::pe;
-use binfarce::ByteOrder;
-use binfarce::Format;
+use cargo_bloat::{
+    BloatAnalyzer, BuildContext, AnalysisConfig, AnalysisResult, 
+    ArtifactKind, BloatError
+};
 
-mod crate_name;
+#[cfg(feature = "cli")]
+use pico_args;
+#[cfg(feature = "cli")]
+use term_size;
+
 mod table;
 
 use crate::table::Table;
 
-struct Data {
-    symbols: Vec<SymbolData>,
-    file_size: u64,
-    text_size: u64,
-    section_name: Option<String>,
+// CLI-specific types
+struct Methods {
+    has_filter: bool,
+    filter_out_size: u64,
+    filter_out_len: usize,
+    methods: Vec<Method>,
 }
 
-pub struct CrateData {
-    exe_path: Option<String>,
-    data: Data,
-    std_crates: Vec<String>,
-    dep_crates: Vec<String>,
-    deps_symbols: MultiMap<String, String>, // symbol, crate
+struct Method {
+    name: String,
+    crate_name: String,
+    size: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum ArtifactKind {
-    Binary,
-    Library,
-    DynLib,
+struct Crates {
+    filter_out_size: u64,
+    filter_out_len: usize,
+    crates: Vec<Crate>,
 }
 
-#[derive(Debug)]
-struct Artifact {
-    kind: ArtifactKind,
-    name: String, // TODO: Rc?
-    path: path::PathBuf,
+struct Crate {
+    name: String,
+    size: u64,
 }
-
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug)]
-enum Error {
-    StdDirNotFound(path::PathBuf),
-    RustcFailed,
-    CargoError(String),
-    CargoMetadataFailed,
-    CargoBuildFailed,
-    UnsupportedCrateType,
-    OpenFailed(path::PathBuf),
-    InvalidCargoOutput,
-    NoArtifacts,
-    UnsupportedFileFormat(path::PathBuf),
-    ParsingError(binfarce::ParseError),
-    PdbError(pdb::Error),
-}
-
-impl From<binfarce::ParseError> for Error {
-    fn from(e: binfarce::ParseError) -> Self {
-        Error::ParsingError(e)
-    }
-}
-
-impl From<binfarce::UnexpectedEof> for Error {
-    fn from(_: binfarce::UnexpectedEof) -> Self {
-        Error::ParsingError(binfarce::ParseError::UnexpectedEof)
-    }
-}
-
-impl From<pdb::Error> for Error {
-    fn from(e: pdb::Error) -> Self {
-        Error::PdbError(e)
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::StdDirNotFound(ref path) => {
-                write!(
-                    f,
-                    "failed to find a dir with std libraries. Expected location: {}",
-                    path.display()
-                )
-            }
-            Error::RustcFailed => {
-                write!(f, "failed to execute 'rustc'. It should be in the PATH")
-            }
-            Error::CargoError(ref msg) => {
-                write!(f, "{}", msg)
-            }
-            Error::CargoMetadataFailed => {
-                write!(f, "failed to execute 'cargo'. It should be in the PATH")
-            }
-            Error::CargoBuildFailed => {
-                write!(f, "failed to execute 'cargo build'. Probably a build error")
-            }
-            Error::UnsupportedCrateType => {
-                write!(
-                    f,
-                    "only 'bin', 'dylib' and 'cdylib' crate types are supported"
-                )
-            }
-            Error::OpenFailed(ref path) => {
-                write!(f, "failed to open a file '{}'", path.display())
-            }
-            Error::InvalidCargoOutput => {
-                write!(f, "failed to parse 'cargo' output")
-            }
-            Error::NoArtifacts => {
-                write!(f, "'cargo' does not produce any build artifacts")
-            }
-            Error::UnsupportedFileFormat(ref path) => {
-                write!(f, "'{}' has an unsupported file format", path.display())
-            }
-            Error::ParsingError(ref e) => {
-                write!(f, "parsing failed cause '{}'", e)
-            }
-            Error::PdbError(ref e) => {
-                write!(f, "error parsing pdb file cause '{}'", e)
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 fn main() {
     if let Ok(wrap) = std::env::var("RUSTC_WRAPPER") {
@@ -182,7 +88,7 @@ fn main() {
         return;
     }
 
-    let mut crate_data = match process_crate(&args) {
+    let (context, binary_path) = match process_crate(&args) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Error: {}.", e);
@@ -190,50 +96,71 @@ fn main() {
         }
     };
 
-    if let Some(ref path) = crate_data.exe_path {
-        eprintln!("    Analyzing {}", path);
+    if let Some(ref path) = binary_path {
+        eprintln!("    Analyzing {}", path.display());
         eprintln!();
     }
 
     let term_width = if !args.wide {
-        term_size::dimensions().map(|v| v.0)
+        #[cfg(feature = "cli")]
+        {
+            term_size::dimensions().map(|v| v.0)
+        }
+        #[cfg(not(feature = "cli"))]
+        {
+            None
+        }
     } else {
         None
     };
 
+    // Analyze the binary using the library
+    let config = AnalysisConfig {
+        symbols_section: args.symbols_section.clone(),
+        split_std: args.split_std,
+    };
+
+    let analysis_result = match BloatAnalyzer::analyze_binary(&binary_path.unwrap(), &context, &config) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Error: {}.", e);
+            process::exit(1);
+        }
+    };
+
     if args.crates {
-        let crates = filter_crates(&mut crate_data, &args);
+        let crates = filter_crates_from_result(&analysis_result, &context, &args);
         match args.message_format {
             MessageFormat::Table => {
                 if args.no_relative_size {
-                    print_crates_table_no_relative(crates, &crate_data.data, term_width);
+                    print_crates_table_no_relative(crates, &analysis_result, term_width);
                 } else {
-                    print_crates_table(crates, &crate_data.data, term_width);
+                    print_crates_table(crates, &analysis_result, term_width);
                 }
             }
             MessageFormat::Json => {
                 print_crates_json(
                     &crates.crates,
-                    crate_data.data.text_size,
-                    crate_data.data.file_size,
+                    analysis_result.text_size,
+                    analysis_result.file_size,
                 );
             }
         }
     } else {
-        let methods = filter_methods(&mut crate_data, &args);
+        let methods = filter_methods_from_result(&analysis_result, &context, &args);
         match args.message_format {
             MessageFormat::Table => {
                 if args.no_relative_size {
-                    print_methods_table_no_relative(methods, &crate_data.data, term_width);
+                    print_methods_table_no_relative(methods, &analysis_result, term_width);
                 } else {
-                    print_methods_table(methods, &crate_data.data, term_width);
+                    print_methods_table(methods, &analysis_result, term_width);
                 }
             }
             MessageFormat::Json => {
                 print_methods_json(
                     &methods.methods,
-                    crate_data.data.text_size,
-                    crate_data.data.file_size,
+                    analysis_result.text_size,
+                    analysis_result.file_size,
                 );
             }
         }
@@ -248,7 +175,7 @@ fn main() {
             );
         }
 
-        if crate_data.data.symbols.len() < 10 {
+        if analysis_result.symbols.len() < 10 {
             println!();
             println!(
                 "Warning: it seems like the `.text` section is nearly empty. \
@@ -405,7 +332,7 @@ fn wrapper_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Command::new(&args[1])
         .args(&args[2..])
         .status()
-        .map_err(|_| Error::CargoBuildFailed)?;
+        .map_err(|_| BloatError::CargoBuildFailed)?;
 
     let time_ns: u64 = start.elapsed().as_nanos().try_into()?;
 
@@ -467,224 +394,211 @@ fn wrapper_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn stdlibs_dir(target_triple: &str) -> Result<path::PathBuf, Error> {
-    // Support xargo by applying the rustflags
-    // This is meant to match how cargo handles the RUSTFLAG environment
-    // variable.
-    // See https://github.com/rust-lang/cargo/blob/69aea5b6f69add7c51cca939a79644080c0b0ba0
-    // /src/cargo/core/compiler/build_context/target_info.rs#L434-L441
-    let rustflags = std::env::var("RUSTFLAGS").unwrap_or_else(|_| String::new());
 
-    let rustflags = rustflags
-        .split(' ')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(AsRef::<std::ffi::OsStr>::as_ref);
 
-    let output = Command::new("rustc")
-        .args(rustflags)
-        .arg("--print=sysroot")
-        .output()
-        .map_err(|_| Error::RustcFailed)?;
 
-    let stdout = str::from_utf8(&output.stdout).unwrap();
-
-    // From the `cargo` itself (this is a one long link):
-    // https://github.com/rust-lang/cargo/blob/065e3ef98d3edbce5c9e66d927d9ac9944cc6639
-    // /src/cargo/core/compiler/build_context/target_info.rs#L130..L133
-    let mut rustlib = path::PathBuf::from(stdout.trim());
-    rustlib.push("lib");
-    rustlib.push("rustlib");
-    rustlib.push(target_triple);
-    rustlib.push("lib");
-
-    if !rustlib.exists() {
-        return Err(Error::StdDirNotFound(rustlib));
-    }
-
-    Ok(rustlib)
-}
-
-fn get_default_target() -> Result<String, Error> {
-    let output = Command::new("rustc")
-        .arg("-Vv")
-        .output()
-        .map_err(|_| Error::RustcFailed)?;
-
-    let stdout = str::from_utf8(&output.stdout).unwrap();
-    for line in stdout.lines() {
-        if line.starts_with("host:") {
-            return Ok(line[6..].to_owned());
-        }
-    }
-
-    Err(Error::RustcFailed)
-}
-
-fn get_workspace_root() -> Result<String, Error> {
-    let output = Command::new("cargo")
-        .args(["metadata"])
-        .output()
-        .map_err(|_| Error::CargoMetadataFailed)?;
-
-    if !output.status.success() {
-        let mut msg = str::from_utf8(&output.stderr).unwrap().trim();
-        if msg.starts_with("error: ") {
-            msg = &msg[7..];
-        }
-
-        return Err(Error::CargoError(msg.to_string()));
-    }
-
-    let stdout = str::from_utf8(&output.stdout).unwrap();
-    if let Some(line) = stdout.lines().next() {
-        let meta = json::parse(line).map_err(|_| Error::InvalidCargoOutput)?;
-        let root = meta["workspace_root"]
-            .as_str()
-            .ok_or(Error::InvalidCargoOutput)?;
-        return Ok(root.to_string());
-    }
-
-    Err(Error::InvalidCargoOutput)
-}
-
-fn process_crate(args: &Args) -> Result<CrateData, Error> {
-    let workspace_root = get_workspace_root()?;
-
-    let default_target = get_default_target()?;
-    let target_triple = args.target.clone().unwrap_or(default_target);
-
+fn process_crate(args: &Args) -> Result<(BuildContext, Option<path::PathBuf>), BloatError> {
     // Run `cargo build` without json output first, so we could print build errors.
     {
         let cmd = &mut Command::new("cargo");
         cmd.args(get_cargo_args(args, false));
-        cmd.envs(get_cargo_envs(args, &target_triple));
+        cmd.envs(get_cargo_envs(args));
 
         cmd.spawn()
-            .map_err(|_| Error::CargoBuildFailed)?
+            .map_err(|_| BloatError::CargoBuildFailed)?
             .wait()
-            .map_err(|_| Error::CargoBuildFailed)?;
+            .map_err(|_| BloatError::CargoBuildFailed)?;
     }
 
     // Run `cargo build` with json output and collect it.
-    // This would not cause a rebuild.
     let cmd = &mut Command::new("cargo");
     cmd.args(get_cargo_args(args, true));
-    cmd.envs(get_cargo_envs(args, &target_triple));
+    cmd.envs(get_cargo_envs(args));
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
 
-    let child = cmd.spawn().map_err(|_| Error::CargoBuildFailed)?;
+    let child = cmd.spawn().map_err(|_| BloatError::CargoBuildFailed)?;
 
     let output = child
         .wait_with_output()
-        .map_err(|_| Error::CargoBuildFailed)?;
+        .map_err(|_| BloatError::CargoBuildFailed)?;
     if !output.status.success() {
-        return Err(Error::CargoBuildFailed);
+        return Err(BloatError::CargoBuildFailed);
     }
 
     let stdout = str::from_utf8(&output.stdout).unwrap();
+    let json_lines: Vec<&str> = stdout.lines().collect();
 
-    let mut artifacts = Vec::new();
-    for line in stdout.lines() {
-        let build = json::parse(line).map_err(|_| Error::InvalidCargoOutput)?;
-        if let Some(target_name) = build["target"]["name"].as_str() {
-            if !build["filenames"].is_null() {
-                let filenames = build["filenames"].members();
-                let crate_types = build["target"]["crate_types"].members();
-                for (path, crate_type) in filenames.zip(crate_types) {
-                    let kind = match crate_type.as_str().unwrap() {
-                        "bin" => ArtifactKind::Binary,
-                        "lib" | "rlib" => ArtifactKind::Library,
-                        "dylib" | "cdylib" => ArtifactKind::DynLib,
-                        _ => continue, // Simply ignore.
-                    };
+    // Use the library to parse cargo metadata
+    let context = BloatAnalyzer::from_cargo_metadata(
+        &json_lines,
+        &path::PathBuf::from("target"),
+        args.target.as_deref(),
+    )?;
 
-                    artifacts.push({
-                        Artifact {
-                            kind,
-                            name: target_name.replace('-', "_"),
-                            path: path::PathBuf::from(&path.as_str().unwrap()),
-                        }
-                    });
+    // Find the binary artifact to analyze
+    let binary_path = context.artifacts.iter()
+        .find(|a| a.kind == ArtifactKind::Binary)
+        .map(|a| a.path.clone())
+        .ok_or(BloatError::UnsupportedCrateType)?;
+
+    Ok((context, Some(binary_path)))
+}
+
+fn filter_methods_from_result(result: &AnalysisResult, context: &BuildContext, args: &Args) -> Methods {
+    use cargo_bloat::crate_name;
+    
+    // Create indices to sort by size without cloning symbols
+    let mut symbol_indices: Vec<usize> = (0..result.symbols.len()).collect();
+    symbol_indices.sort_by_key(|&i| result.symbols[i].size);
+
+    let n = if args.n == 0 {
+        result.symbols.len()
+    } else {
+        args.n
+    };
+
+    let mut methods = Vec::with_capacity(n);
+
+    enum FilterBy {
+        None,
+        Crate(String),
+        #[cfg(feature = "regex-filter")]
+        Regex(regex::Regex),
+        #[cfg(not(feature = "regex-filter"))]
+        Substring(String),
+    }
+
+    let filter = if let Some(ref text) = args.filter {
+        if context.std_crates.contains(text) || context.dep_crates.contains(text) {
+            FilterBy::Crate(text.clone())
+        } else {
+            #[cfg(feature = "regex-filter")]
+            {
+                match regex::Regex::new(text) {
+                    Ok(re) => FilterBy::Regex(re),
+                    Err(_) => {
+                        eprintln!(
+                            "Warning: the filter value contains an unknown crate \
+                                   or an invalid regexp. Ignored."
+                        );
+                        FilterBy::None
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "regex-filter"))]
+            {
+                FilterBy::Substring(text.clone())
+            }
+        }
+    } else {
+        FilterBy::None
+    };
+
+    let has_filter = !matches!(filter, FilterBy::None);
+
+    let mut filter_out_size = 0;
+    let mut filter_out_len = 0;
+
+    for &i in symbol_indices.iter().rev() {
+        let sym = &result.symbols[i];
+        let (mut crate_name, is_exact) = crate_name::from_sym(context, args.split_std, &sym.name);
+
+        if !is_exact {
+            crate_name.push('?');
+        }
+
+        let name = if args.full_fn {
+            sym.name.complete.clone()
+        } else {
+            sym.name.trimmed.clone()
+        };
+
+        match filter {
+            FilterBy::None => {}
+            FilterBy::Crate(ref crate_name_f) => {
+                if crate_name_f != &crate_name {
+                    continue;
+                }
+            }
+            #[cfg(feature = "regex-filter")]
+            FilterBy::Regex(ref re) => {
+                if !re.is_match(&name) {
+                    continue;
+                }
+            }
+            #[cfg(not(feature = "regex-filter"))]
+            FilterBy::Substring(ref s) => {
+                if !name.contains(s) {
+                    continue;
                 }
             }
         }
-    }
 
-    if artifacts.is_empty() {
-        return Err(Error::NoArtifacts);
-    }
+        filter_out_len += 1;
 
-    let mut rlib_paths = Vec::new();
-
-    let mut dep_crates = Vec::new();
-    for artifact in &artifacts {
-        dep_crates.push(artifact.name.clone());
-
-        if artifact.kind == ArtifactKind::Library {
-            rlib_paths.push((artifact.name.clone(), artifact.path.clone()));
+        if n == 0 || methods.len() < n {
+            methods.push(Method {
+                name,
+                crate_name,
+                size: sym.size,
+            })
+        } else {
+            filter_out_size += sym.size;
         }
     }
 
-    dep_crates.dedup();
-    dep_crates.sort();
-
-    let std_crates: Vec<String> = if args
-        .unstable
-        .iter()
-        .any(|unstable_arg| unstable_arg.starts_with("build-std"))
-    {
-        Vec::new()
-    } else {
-        let target_dylib_path = stdlibs_dir(&target_triple)?;
-        let std_paths = collect_rlib_paths(&target_dylib_path);
-        let mut std_crates: Vec<String> = std_paths.iter().map(|v| v.0.clone()).collect();
-        rlib_paths.extend_from_slice(&std_paths);
-        std_crates.sort();
-
-        // Remove std crates that was explicitly added as dependencies.
-        //
-        // Like: getopts, bitflags, backtrace, log, etc.
-        for c in &dep_crates {
-            if let Some(idx) = std_crates.iter().position(|v| v == c) {
-                std_crates.remove(idx);
-            }
-        }
-        std_crates
-    };
-
-    let deps_symbols = collect_deps_symbols(rlib_paths)?;
-
-    let prepare_path = |path: &path::Path| {
-        path.strip_prefix(workspace_root)
-            .unwrap_or(path)
-            .to_str()
-            .unwrap()
-            .to_string()
-    };
-
-    // The last artifact should be our binary/dylib/cdylib.
-    if let Some(artifact) = artifacts.last() {
-        if artifact.kind != ArtifactKind::Library {
-            let section_name = args.symbols_section.as_deref().unwrap_or(".text");
-            return Ok(CrateData {
-                exe_path: Some(prepare_path(&artifact.path)),
-                data: collect_self_data(&artifact.path, section_name)?,
-                std_crates,
-                dep_crates,
-                deps_symbols,
-            });
-        }
+    Methods {
+        has_filter,
+        filter_out_size,
+        filter_out_len,
+        methods,
     }
-
-    Err(Error::UnsupportedCrateType)
 }
 
-fn get_cargo_envs(
-    args: &Args,
-    target_triple: &str
-) -> Vec<(impl AsRef<OsStr>, impl AsRef<OsStr>)> {
+fn filter_crates_from_result(result: &AnalysisResult, context: &BuildContext, args: &Args) -> Crates {
+    use cargo_bloat::crate_name;
+    
+    let mut crates = Vec::new();
+    let mut sizes = HashMap::new();
+
+    for sym in result.symbols.iter() {
+        let (crate_name, _) = crate_name::from_sym(context, args.split_std, &sym.name);
+
+        if let Some(v) = sizes.get(&crate_name).cloned() {
+            sizes.insert(crate_name.to_string(), v + sym.size);
+        } else {
+            sizes.insert(crate_name.to_string(), sym.size);
+        }
+    }
+
+    let mut list: Vec<(&String, &u64)> = sizes.iter().collect();
+    list.sort_by_key(|v| v.1);
+
+    let n = if args.n == 0 { list.len() } else { args.n };
+    for &(k, v) in list.iter().rev().take(n) {
+        crates.push(Crate {
+            name: k.clone(),
+            size: *v,
+        });
+    }
+
+    let mut filter_out_size = 0;
+    if n < list.len() {
+        for &(_, v) in list.iter().rev().skip(n) {
+            filter_out_size += *v;
+        }
+    }
+
+    Crates {
+        filter_out_size,
+        filter_out_len: list.len() - crates.len(),
+        crates,
+    }
+}
+
+fn get_cargo_envs(args: &Args) -> Vec<(String, String)> {
     let mut list = Vec::new();
 
     let profile = args.get_profile()
@@ -693,14 +607,11 @@ fn get_cargo_envs(
 
     // No matter which profile we are building for, never strip the binary
     // because we need the symbols.
-    list.push((format!("CARGO_PROFILE_{}_STRIP", profile), "false"));
+    list.push((format!("CARGO_PROFILE_{}_STRIP", profile), "false".to_string()));
 
-    // When targeting MSVC, symbols data will be stored in PDB files.
-    // Because of that, the Release build would not have any useful information
-    // even if not stripped. Therefore, force the debug info for MSVC target.
-    if target_triple.contains("msvc") {
-        list.push((format!("CARGO_PROFILE_{}_DEBUG", profile), "true"));
-    }
+    // For MSVC targets, force debug info. We can't easily check target here,
+    // so we'll always set debug info to be safe.
+    list.push((format!("CARGO_PROFILE_{}_DEBUG", profile), "true".to_string()));
 
     list
 }
@@ -787,398 +698,15 @@ fn get_cargo_args(args: &Args, json_output: bool) -> Vec<String> {
     list
 }
 
-fn collect_rlib_paths(deps_dir: &path::Path) -> Vec<(String, path::PathBuf)> {
-    let mut rlib_paths: Vec<(String, path::PathBuf)> = Vec::new();
-    if let Ok(entries) = fs::read_dir(deps_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(Some("rlib")) = path.extension().map(|s| s.to_str()) {
-                let mut stem = path.file_stem().unwrap().to_str().unwrap().to_string();
-                if let Some(idx) = stem.bytes().position(|b| b == b'-') {
-                    stem.drain(idx..);
-                }
 
-                stem.drain(0..3); // trim 'lib'
 
-                rlib_paths.push((stem, path));
-            }
-        }
-    }
 
-    rlib_paths.sort_by(|a, b| a.0.cmp(&b.0));
 
-    rlib_paths
-}
 
-fn map_file(path: &path::Path) -> Result<memmap2::Mmap, Error> {
-    let file = fs::File::open(path).map_err(|_| Error::OpenFailed(path.to_owned()))?;
-    let file =
-        unsafe { memmap2::Mmap::map(&file).map_err(|_| Error::OpenFailed(path.to_owned()))? };
-    Ok(file)
-}
 
-fn collect_deps_symbols(
-    libs: Vec<(String, path::PathBuf)>,
-) -> Result<MultiMap<String, String>, Error> {
-    let mut map = MultiMap::new();
 
-    for (name, path) in libs {
-        let file = map_file(&path)?;
-        for sym in ar::parse(&file)? {
-            map.insert(sym, name.clone());
-        }
-    }
 
-    for (_, v) in map.iter_all_mut() {
-        v.dedup();
-    }
-
-    Ok(map)
-}
-
-fn collect_self_data(path: &path::Path, section_name: &str) -> Result<Data, Error> {
-    let data = &map_file(path)?;
-
-    let mut d = match binfarce::detect_format(data) {
-        Format::Elf32 { byte_order: _ } => collect_elf_data(path, data, section_name)?,
-        Format::Elf64 { byte_order: _ } => collect_elf_data(path, data, section_name)?,
-        Format::Macho => collect_macho_data(data)?,
-        Format::PE => collect_pe_data(path, data)?,
-        Format::Unknown => return Err(Error::UnsupportedFileFormat(path.to_owned())),
-    };
-
-    // Multiple symbols may point to the same address.
-    // Remove duplicates.
-    d.symbols.sort_by_key(|v| v.address);
-    d.symbols.dedup_by_key(|v| v.address);
-
-    d.file_size = fs::metadata(path).unwrap().len();
-
-    Ok(d)
-}
-
-fn collect_elf_data(path: &path::Path, data: &[u8], section_name: &str) -> Result<Data, Error> {
-    let is_64_bit = match data[4] {
-        1 => false,
-        2 => true,
-        _ => return Err(Error::UnsupportedFileFormat(path.to_owned())),
-    };
-
-    let byte_order = match data[5] {
-        1 => ByteOrder::LittleEndian,
-        2 => ByteOrder::BigEndian,
-        _ => return Err(Error::UnsupportedFileFormat(path.to_owned())),
-    };
-
-    let (symbols, text_size) = if is_64_bit {
-        elf64::parse(data, byte_order)?.symbols(section_name)?
-    } else {
-        elf32::parse(data, byte_order)?.symbols(section_name)?
-    };
-
-    let d = Data {
-        symbols,
-        file_size: 0,
-        text_size,
-        section_name: Some(section_name.to_owned()),
-    };
-
-    Ok(d)
-}
-
-fn collect_macho_data(data: &[u8]) -> Result<Data, Error> {
-    let (symbols, text_size) = macho::parse(data)?.symbols()?;
-    let d = Data {
-        symbols,
-        file_size: 0,
-        text_size,
-        section_name: None,
-    };
-
-    Ok(d)
-}
-
-fn collect_pdb_data(pdb_path: &path::Path, text_size: u64) -> Result<Data, Error> {
-    use pdb::FallibleIterator;
-
-    let file = fs::File::open(pdb_path).map_err(|_| Error::OpenFailed(pdb_path.to_owned()))?;
-    let mut pdb = pdb::PDB::open(file)?;
-
-    let dbi = pdb.debug_information()?;
-    let symbol_table = pdb.global_symbols()?;
-    let address_map = pdb.address_map()?;
-
-    let mut out_symbols = Vec::new();
-
-    // Collect the PublicSymbols.
-    let mut public_symbols = Vec::new();
-
-    let mut symbols = symbol_table.iter();
-    while let Ok(Some(symbol)) = symbols.next() {
-        if let Ok(pdb::SymbolData::Public(data)) = symbol.parse() {
-            if data.code || data.function {
-                public_symbols.push((data.offset, data.name.to_string().into_owned()));
-            }
-        }
-    }
-
-    let mut modules = dbi.modules()?;
-    while let Some(module) = modules.next()? {
-        let info = match pdb.module_info(&module)? {
-            Some(info) => info,
-            None => continue,
-        };
-        let mut symbols = info.symbols()?;
-        while let Some(symbol) = symbols.next()? {
-            if let Ok(pdb::SymbolData::Public(data)) = symbol.parse() {
-                if data.code || data.function {
-                    public_symbols.push((data.offset, data.name.to_string().into_owned()));
-                }
-            }
-        }
-    }
-
-    let cmp_offsets = |a: &pdb::PdbInternalSectionOffset, b: &pdb::PdbInternalSectionOffset| {
-        a.section.cmp(&b.section).then(a.offset.cmp(&b.offset))
-    };
-    public_symbols.sort_unstable_by(|a, b| cmp_offsets(&a.0, &b.0));
-
-    // Now find the Procedure symbols in all modules
-    // and if possible the matching PublicSymbol record with the mangled name.
-    let mut handle_proc = |proc: pdb::ProcedureSymbol| {
-        let mangled_symbol = public_symbols
-            .binary_search_by(|probe| {
-                let low = cmp_offsets(&probe.0, &proc.offset);
-                let high = cmp_offsets(&probe.0, &(proc.offset + proc.len));
-
-                use std::cmp::Ordering::*;
-                match (low, high) {
-                    // Less than the low bound -> less.
-                    (Less, _) => Less,
-                    // More than the high bound -> greater.
-                    (_, Greater) => Greater,
-                    _ => Equal,
-                }
-            })
-            .ok()
-            .map(|x| &public_symbols[x]);
-
-        let demangled_name = proc.name.to_string().into_owned();
-        out_symbols.push((
-            proc.offset.to_rva(&address_map),
-            proc.len as u64,
-            demangled_name,
-            mangled_symbol,
-        ));
-    };
-
-    let mut symbols = symbol_table.iter();
-    while let Ok(Some(symbol)) = symbols.next() {
-        if let Ok(pdb::SymbolData::Procedure(proc)) = symbol.parse() {
-            handle_proc(proc);
-        }
-    }
-
-    let mut modules = dbi.modules()?;
-    while let Some(module) = modules.next()? {
-        let info = match pdb.module_info(&module)? {
-            Some(info) => info,
-            None => continue,
-        };
-
-        let mut symbols = info.symbols()?;
-
-        while let Some(symbol) = symbols.next()? {
-            if let Ok(pdb::SymbolData::Procedure(proc)) = symbol.parse() {
-                handle_proc(proc);
-            }
-        }
-    }
-
-    let symbols = out_symbols
-        .into_iter()
-        .filter_map(|(address, size, unmangled_name, mangled_name)| {
-            address.map(|address| SymbolData {
-                name: mangled_name
-                    .map(|(_, mangled_name)| binfarce::demangle::SymbolName::demangle(mangled_name))
-                    // Assume the Symbol record name is unmangled if we didn't find one.
-                    // Note that unmangled names stored in PDB have a different format from
-                    // one stored in binaries itself. Specifically they do not include hash
-                    // and can have a bit different formatting.
-                    // We also assume that a Legacy mangling scheme were used.
-                    .unwrap_or_else(|| binfarce::demangle::SymbolName {
-                        complete: unmangled_name.clone(),
-                        trimmed: unmangled_name.clone(),
-                        crate_name: None,
-                        kind: binfarce::demangle::Kind::Legacy,
-                    }),
-                address: address.0 as u64,
-                size,
-            })
-        })
-        .collect();
-
-    let d = Data {
-        symbols,
-        file_size: 0,
-        text_size,
-        section_name: None,
-    };
-
-    Ok(d)
-}
-
-fn collect_pe_data(path: &path::Path, data: &[u8]) -> Result<Data, Error> {
-    let (symbols, text_size) = pe::parse(data)?.symbols()?;
-
-    // `pe::parse` will return zero symbols for an executable built with MSVC.
-    if symbols.is_empty() {
-        let pdb_path = {
-            let file_name = if let Some(file_name) = path.file_name() {
-                if let Some(file_name) = file_name.to_str() {
-                    file_name.replace('-', "_")
-                } else {
-                    return Err(Error::OpenFailed(path.to_owned()));
-                }
-            } else {
-                return Err(Error::OpenFailed(path.to_owned()));
-            };
-            path.with_file_name(file_name).with_extension("pdb")
-        };
-
-        collect_pdb_data(&pdb_path, text_size)
-    } else {
-        Ok(Data {
-            symbols,
-            file_size: 0,
-            text_size,
-            section_name: None,
-        })
-    }
-}
-
-struct Methods {
-    has_filter: bool,
-    filter_out_size: u64,
-    filter_out_len: usize,
-    methods: Vec<Method>,
-}
-
-struct Method {
-    name: String,
-    crate_name: String,
-    size: u64,
-}
-
-fn filter_methods(d: &mut CrateData, args: &Args) -> Methods {
-    d.data.symbols.sort_by_key(|v| v.size);
-
-    let dd = &d.data;
-    let n = if args.n == 0 {
-        dd.symbols.len()
-    } else {
-        args.n
-    };
-
-    let mut methods = Vec::with_capacity(n);
-
-    enum FilterBy {
-        None,
-        Crate(String),
-        #[cfg(feature = "regex-filter")]
-        Regex(regex::Regex),
-        #[cfg(not(feature = "regex-filter"))]
-        Substring(String),
-    }
-
-    let filter = if let Some(ref text) = args.filter {
-        if d.std_crates.contains(text) || d.dep_crates.contains(text) {
-            FilterBy::Crate(text.clone())
-        } else {
-            #[cfg(feature = "regex-filter")]
-            {
-                match regex::Regex::new(text) {
-                    Ok(re) => FilterBy::Regex(re),
-                    Err(_) => {
-                        eprintln!(
-                            "Warning: the filter value contains an unknown crate \
-                                   or an invalid regexp. Ignored."
-                        );
-                        FilterBy::None
-                    }
-                }
-            }
-
-            #[cfg(not(feature = "regex-filter"))]
-            {
-                FilterBy::Substring(text.clone())
-            }
-        }
-    } else {
-        FilterBy::None
-    };
-
-    let has_filter = !matches!(filter, FilterBy::None);
-
-    let mut filter_out_size = 0;
-    let mut filter_out_len = 0;
-
-    for sym in dd.symbols.iter().rev() {
-        let (mut crate_name, is_exact) = crate_name::from_sym(d, args, &sym.name);
-
-        if !is_exact {
-            crate_name.push('?');
-        }
-
-        let name = if args.full_fn {
-            sym.name.complete.clone()
-        } else {
-            sym.name.trimmed.clone()
-        };
-
-        match filter {
-            FilterBy::None => {}
-            FilterBy::Crate(ref crate_name_f) => {
-                if crate_name_f != &crate_name {
-                    continue;
-                }
-            }
-            #[cfg(feature = "regex-filter")]
-            FilterBy::Regex(ref re) => {
-                if !re.is_match(&name) {
-                    continue;
-                }
-            }
-            #[cfg(not(feature = "regex-filter"))]
-            FilterBy::Substring(ref s) => {
-                if !name.contains(s) {
-                    continue;
-                }
-            }
-        }
-
-        filter_out_len += 1;
-
-        if n == 0 || methods.len() < n {
-            methods.push(Method {
-                name,
-                crate_name,
-                size: sym.size,
-            })
-        } else {
-            filter_out_size += sym.size;
-        }
-    }
-
-    Methods {
-        has_filter,
-        filter_out_size,
-        filter_out_len,
-        methods,
-    }
-}
-
-fn print_methods_table(methods: Methods, data: &Data, term_width: Option<usize>) {
+fn print_methods_table(methods: Methods, data: &AnalysisResult, term_width: Option<usize>) {
     let section_name = data.section_name.as_deref().unwrap_or(".text");
     let mut table = Table::new(&["File", section_name, "Size", "Crate", "Name"]);
     table.set_width(term_width);
@@ -1244,7 +772,7 @@ fn print_methods_table(methods: Methods, data: &Data, term_width: Option<usize>)
     print!("{}", table);
 }
 
-fn print_methods_table_no_relative(methods: Methods, data: &Data, term_width: Option<usize>) {
+fn print_methods_table_no_relative(methods: Methods, data: &AnalysisResult, term_width: Option<usize>) {
     let mut table = Table::new(&["Size", "Crate", "Name"]);
     table.set_width(term_width);
 
@@ -1304,9 +832,7 @@ fn print_methods_json(methods: &[Method], text_size: u64, file_size: u64) {
     let mut items = json::JsonValue::new_array();
     for method in methods {
         let mut map = json::JsonValue::new_object();
-        if method.crate_name != crate_name::UNKNOWN {
-            map["crate"] = method.crate_name.clone().into();
-        }
+        map["crate"] = method.crate_name.clone().into();
         map["name"] = method.name.clone().into();
         map["size"] = method.size.into();
 
@@ -1321,59 +847,7 @@ fn print_methods_json(methods: &[Method], text_size: u64, file_size: u64) {
     println!("{}", root.dump());
 }
 
-struct Crates {
-    filter_out_size: u64,
-    filter_out_len: usize,
-    crates: Vec<Crate>,
-}
-
-struct Crate {
-    name: String,
-    size: u64,
-}
-
-fn filter_crates(d: &mut CrateData, args: &Args) -> Crates {
-    let mut crates = Vec::new();
-
-    let dd = &d.data;
-    let mut sizes = HashMap::new();
-
-    for sym in dd.symbols.iter() {
-        let (crate_name, _) = crate_name::from_sym(d, args, &sym.name);
-
-        if let Some(v) = sizes.get(&crate_name).cloned() {
-            sizes.insert(crate_name.to_string(), v + sym.size);
-        } else {
-            sizes.insert(crate_name.to_string(), sym.size);
-        }
-    }
-
-    let mut list: Vec<(&String, &u64)> = sizes.iter().collect();
-    list.sort_by_key(|v| v.1);
-
-    let n = if args.n == 0 { list.len() } else { args.n };
-    for &(k, v) in list.iter().rev().take(n) {
-        crates.push(Crate {
-            name: k.clone(),
-            size: *v,
-        });
-    }
-
-    let mut filter_out_size = 0;
-    if n < list.len() {
-        for &(_, v) in list.iter().rev().skip(n) {
-            filter_out_size += *v;
-        }
-    }
-
-    Crates {
-        filter_out_size,
-        filter_out_len: list.len() - crates.len(),
-        crates,
-    }
-}
-
-fn print_crates_table(crates: Crates, data: &Data, term_width: Option<usize>) {
+fn print_crates_table(crates: Crates, data: &AnalysisResult, term_width: Option<usize>) {
     let section_name = data.section_name.as_deref().unwrap_or(".text");
     let mut table = Table::new(&["File", section_name, "Size", "Crate"]);
     table.set_width(term_width);
@@ -1413,7 +887,7 @@ fn print_crates_table(crates: Crates, data: &Data, term_width: Option<usize>) {
     print!("{}", table);
 }
 
-fn print_crates_table_no_relative(crates: Crates, data: &Data, term_width: Option<usize>) {
+fn print_crates_table_no_relative(crates: Crates, data: &AnalysisResult, term_width: Option<usize>) {
     let mut table = Table::new(&["Size", "Crate"]);
     table.set_width(term_width);
 
@@ -1478,3 +952,4 @@ fn format_size(bytes: u64) -> String {
         format!("{}B", bytes)
     }
 }
+

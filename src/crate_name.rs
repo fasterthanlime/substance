@@ -1,12 +1,12 @@
-use crate::{Args, CrateData};
+use crate::BuildContext;
 use binfarce::demangle::{self, SymbolName};
 
 pub const UNKNOWN: &str = "[Unknown]";
 
-pub fn from_sym(d: &CrateData, args: &Args, sym: &SymbolName) -> (String, bool) {
+pub fn from_sym(d: &BuildContext, split_std: bool, sym: &SymbolName) -> (String, bool) {
     let (mut name, is_exact) = from_sym_impl(d, sym);
 
-    if !args.split_std {
+    if !split_std {
         if d.std_crates.contains(&name) {
             name = "std".to_string();
         }
@@ -15,7 +15,7 @@ pub fn from_sym(d: &CrateData, args: &Args, sym: &SymbolName) -> (String, bool) 
     (name, is_exact)
 }
 
-fn from_sym_impl(d: &CrateData, sym: &SymbolName) -> (String, bool) {
+fn from_sym_impl(d: &BuildContext, sym: &SymbolName) -> (String, bool) {
     if let Some(name) = d.deps_symbols.get(&sym.complete) {
         return (name.to_string(), true);
     }
@@ -32,7 +32,7 @@ fn from_sym_impl(d: &CrateData, sym: &SymbolName) -> (String, bool) {
 
 // A simple stupid symbol parser.
 // Should be replaced by something better later.
-fn parse_sym(d: &CrateData, sym: &str) -> (String, bool) {
+fn parse_sym(d: &BuildContext, sym: &str) -> (String, bool) {
     // TODO: ` for `
 
     let mut is_exact = true;
@@ -116,7 +116,7 @@ fn parse_crate_from_sym(sym: &str) -> String {
     crate_name
 }
 
-fn parse_sym_v0(d: &CrateData, sym: &str) -> (String, bool) {
+fn parse_sym_v0(d: &BuildContext, sym: &str) -> (String, bool) {
     let name = parse_crate_from_sym(sym);
 
     // Check that such crate name is an actual dependency
