@@ -12,6 +12,7 @@ use binfarce::macho;
 use binfarce::pe;
 use binfarce::ByteOrder;
 use binfarce::Format;
+use compact_str::CompactString;
 use facet::Facet;
 use log::{debug, error, info, warn};
 use multimap::MultiMap;
@@ -128,10 +129,17 @@ pub struct AnalysisConfig {
     pub target_dir: Option<std::path::PathBuf>,
 }
 
+/// A symbol with its associated crate name
+pub struct Symbol {
+    pub data: SymbolData,
+    pub crate_name: CompactString,
+}
+
 pub struct AnalysisResult {
     pub file_size: u64,
     pub text_size: u64,
     pub symbols: Vec<SymbolData>,
+    pub enriched_symbols: Option<Vec<Symbol>>,
     pub section_name: Option<String>,
     /// LLVM IR analysis data (only present if LLVM IR files were analyzed)
     pub llvm_ir_data: Option<LlvmIrAnalysis>,
@@ -316,6 +324,23 @@ impl fmt::Display for BloatError {
 impl std::error::Error for BloatError {}
 
 // Placeholder implementations - will be filled in subsequent steps
+impl AnalysisResult {
+    /// Enrich symbols with crate name information
+    /// This consumes the original symbols vector to avoid cloning
+    pub fn enrich_symbols(&mut self, context: &BuildContext, split_std: bool) {
+        let symbols = std::mem::take(&mut self.symbols);
+        let enriched: Vec<Symbol> = symbols.into_iter().map(|symbol| {
+            let (crate_name, _is_exact) = crate_name::from_sym(context, split_std, &symbol.name);
+            Symbol {
+                data: symbol,
+                crate_name: CompactString::new(&crate_name),
+            }
+        }).collect();
+        
+        self.enriched_symbols = Some(enriched);
+    }
+}
+
 impl BloatAnalyzer {
     pub fn from_cargo_metadata(
         json_messages: &[&str],
@@ -368,7 +393,7 @@ impl BloatAnalyzer {
                                 path: path::PathBuf::from(path),
                             };
 
-                            info!(
+                            debug!(
                                 "Found artifact: {:?} - {} at {}",
                                 artifact.kind, artifact.name, path
                             );
@@ -427,11 +452,14 @@ impl BloatAnalyzer {
 
     pub fn analyze_binary(
         binary_path: &path::Path,
-        _context: &BuildContext,
+        context: &BuildContext,
         config: &AnalysisConfig,
     ) -> Result<AnalysisResult, BloatError> {
         let section_name = config.symbols_section.as_deref().unwrap_or(".text");
         let mut result = collect_self_data(binary_path, section_name)?;
+
+        // Enrich symbols with crate names
+        result.enrich_symbols(context, config.split_std);
 
         // Optionally add LLVM IR analysis
         if config.analyze_llvm_ir {
@@ -703,8 +731,84 @@ impl CrateChange {
     }
 }
 
+/// Extract crate name from a symbol name
+/// This is a more sophisticated heuristic that handles various symbol patterns
+fn extract_crate_from_symbol(symbol: &str) -> String {
+    // Handle C/C++ symbols
+    if symbol.starts_with("_") || symbol.contains("@") {
+        return "C/C++".to_string();
+    }
+
+    // Skip generic implementations and trait bounds
+    let cleaned = if symbol.starts_with("<") {
+        // For symbols like "<T as alloc::vec::Vec>::method", extract the trait/type after "as"
+        if let Some(as_pos) = symbol.find(" as ") {
+            let after_as = &symbol[as_pos + 4..];
+            if let Some(end) = after_as.find(">::") {
+                after_as[..end].to_string()
+            } else if let Some(end) = after_as.find(">") {
+                after_as[..end].to_string()
+            } else {
+                after_as.to_string()
+            }
+        } else if let Some(space_pos) = symbol.find(" ") {
+            // Handle other generic patterns
+            symbol[space_pos + 1..].to_string()
+        } else {
+            symbol.to_string()
+        }
+    } else {
+        symbol.to_string()
+    };
+
+    // Now extract the crate name from the cleaned symbol
+    let parts: Vec<&str> = cleaned.split("::").collect();
+    if parts.is_empty() {
+        return "unknown".to_string();
+    }
+
+    let first_part = parts[0];
+    
+    // Common Rust standard library crates
+    let std_crates = ["core", "alloc", "std", "proc_macro", "test"];
+    if std_crates.contains(&first_part) {
+        return first_part.to_string();
+    }
+
+    // If it's a known crate pattern, return it
+    if !first_part.is_empty() 
+        && !first_part.starts_with('<')
+        && !first_part.starts_with('_')
+        && !first_part.chars().all(|c| c.is_numeric())
+        && first_part.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return first_part.to_string();
+    }
+
+    // For complex symbols, try to find a crate name in the path
+    for part in parts {
+        if !part.is_empty()
+            && !part.starts_with('<')
+            && !part.starts_with('_')
+            && !part.chars().all(|c| c.is_numeric())
+            && part.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            // Check if this looks like a crate name (not a type or function)
+            if !part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                return part.to_string();
+            }
+        }
+    }
+
+    // Default to unknown
+    "unknown".to_string()
+}
+
 impl AnalysisComparison {
-    pub fn compare(before: &AnalysisResult, after: &AnalysisResult) -> Result<Self, BloatError> {
+    pub fn compare(
+        before: &AnalysisResult,
+        after: &AnalysisResult,
+    ) -> Result<Self, BloatError> {
         // Create file size diff
         let file_size_diff = FileSizeDiff {
             file_size_before: before.file_size,
@@ -713,46 +817,142 @@ impl AnalysisComparison {
             text_size_after: after.text_size,
         };
 
-        // Compare symbols
+        // Check if we have enriched symbols, use them if available
+        let use_enriched = before.enriched_symbols.is_some() && after.enriched_symbols.is_some();
+
+        // Compare symbols using demangled names as keys to avoid duplicates
         let mut symbol_changes = Vec::new();
-        let mut before_symbols = std::collections::HashMap::new();
-        let mut after_symbols = std::collections::HashMap::new();
+        
+        if use_enriched {
+            // Use enriched symbols with proper crate names
+            let before_symbols = before.enriched_symbols.as_ref().unwrap();
+            let after_symbols = after.enriched_symbols.as_ref().unwrap();
+            
+            let mut before_by_demangled = std::collections::HashMap::new();
+            let mut after_by_demangled = std::collections::HashMap::new();
 
-        // Index symbols by name for efficient lookup
-        for symbol in &before.symbols {
-            before_symbols.insert(symbol.name.complete.clone(), symbol);
-        }
-        for symbol in &after.symbols {
-            after_symbols.insert(symbol.name.complete.clone(), symbol);
-        }
+            // Index symbols by demangled name
+            for symbol in before_symbols {
+                let key = symbol.data.name.trimmed.clone();
+                let entry = before_by_demangled.entry(key).or_insert((symbol, 0u64));
+                entry.1 += symbol.data.size;
+            }
+            for symbol in after_symbols {
+                let key = symbol.data.name.trimmed.clone();
+                let entry = after_by_demangled.entry(key).or_insert((symbol, 0u64));
+                entry.1 += symbol.data.size;
+            }
 
-        // Find changes in existing symbols
-        for (name, before_sym) in &before_symbols {
-            let after_sym = after_symbols.get(name);
-            symbol_changes.push(SymbolChange {
-                name: name.clone(),
-                demangled: before_sym.name.trimmed.clone(),
-                size_before: Some(before_sym.size),
-                size_after: after_sym.map(|s| s.size),
-            });
-        }
+            // Find all unique demangled names
+            let mut all_demangled = std::collections::HashSet::new();
+            all_demangled.extend(before_by_demangled.keys().cloned());
+            all_demangled.extend(after_by_demangled.keys().cloned());
 
-        // Find new symbols
-        for (name, after_sym) in &after_symbols {
-            if !before_symbols.contains_key(name) {
+            // Create symbol changes based on demangled names
+            for demangled in all_demangled {
+                let before_info = before_by_demangled.get(&demangled);
+                let after_info = after_by_demangled.get(&demangled);
+                
+                // Use the mangled name from whichever version has it
+                let mangled_name = match (before_info, after_info) {
+                    (Some((sym, _)), _) => sym.data.name.complete.clone(),
+                    (None, Some((sym, _))) => sym.data.name.complete.clone(),
+                    _ => demangled.clone(), // Shouldn't happen
+                };
+                
                 symbol_changes.push(SymbolChange {
-                    name: name.clone(),
-                    demangled: after_sym.name.trimmed.clone(),
-                    size_before: None,
-                    size_after: Some(after_sym.size),
+                    name: mangled_name,
+                    demangled: demangled,
+                    size_before: before_info.map(|(_, size)| *size),
+                    size_after: after_info.map(|(_, size)| *size),
+                });
+            }
+        } else {
+            // Fallback to old behavior
+            let mut before_by_demangled = std::collections::HashMap::new();
+            let mut after_by_demangled = std::collections::HashMap::new();
+
+            for symbol in &before.symbols {
+                let key = symbol.name.trimmed.clone();
+                let entry = before_by_demangled.entry(key).or_insert((symbol, 0u64));
+                entry.1 += symbol.size;
+            }
+            for symbol in &after.symbols {
+                let key = symbol.name.trimmed.clone();
+                let entry = after_by_demangled.entry(key).or_insert((symbol, 0u64));
+                entry.1 += symbol.size;
+            }
+
+            let mut all_demangled = std::collections::HashSet::new();
+            all_demangled.extend(before_by_demangled.keys().cloned());
+            all_demangled.extend(after_by_demangled.keys().cloned());
+
+            for demangled in all_demangled {
+                let before_info = before_by_demangled.get(&demangled);
+                let after_info = after_by_demangled.get(&demangled);
+                
+                let mangled_name = match (before_info, after_info) {
+                    (Some((sym, _)), _) => sym.name.complete.clone(),
+                    (None, Some((sym, _))) => sym.name.complete.clone(),
+                    _ => demangled.clone(),
+                };
+                
+                symbol_changes.push(SymbolChange {
+                    name: mangled_name,
+                    demangled: demangled,
+                    size_before: before_info.map(|(_, size)| *size),
+                    size_after: after_info.map(|(_, size)| *size),
                 });
             }
         }
 
-        // Compare crates
-        // This requires analyzing symbols and grouping by crate
-        // For now, we'll leave crate_changes empty and implement it properly later
-        let crate_changes = Vec::new();
+        // Compare crates by grouping symbols by crate
+        let mut before_crate_sizes: std::collections::HashMap<CompactString, u64> =
+            std::collections::HashMap::new();
+        let mut after_crate_sizes: std::collections::HashMap<CompactString, u64> =
+            std::collections::HashMap::new();
+
+        if use_enriched {
+            // Use proper crate names from enriched symbols
+            let before_symbols = before.enriched_symbols.as_ref().unwrap();
+            let after_symbols = after.enriched_symbols.as_ref().unwrap();
+            
+            for symbol in before_symbols {
+                *before_crate_sizes.entry(symbol.crate_name.clone()).or_insert(0) += symbol.data.size;
+            }
+            
+            for symbol in after_symbols {
+                *after_crate_sizes.entry(symbol.crate_name.clone()).or_insert(0) += symbol.data.size;
+            }
+        } else {
+            // Fallback to extracting from symbol names
+            for symbol in &before.symbols {
+                let crate_name = extract_crate_from_symbol(&symbol.name.trimmed);
+                *before_crate_sizes.entry(CompactString::new(&crate_name)).or_insert(0) += symbol.size;
+            }
+
+            for symbol in &after.symbols {
+                let crate_name = extract_crate_from_symbol(&symbol.name.trimmed);
+                *after_crate_sizes.entry(CompactString::new(&crate_name)).or_insert(0) += symbol.size;
+            }
+        }
+
+        // Build crate changes
+        let mut all_crates = std::collections::HashSet::new();
+        all_crates.extend(before_crate_sizes.keys().cloned());
+        all_crates.extend(after_crate_sizes.keys().cloned());
+
+        let mut crate_changes = Vec::new();
+        for crate_name in all_crates {
+            let size_before = before_crate_sizes.get(&crate_name).copied();
+            let size_after = after_crate_sizes.get(&crate_name).copied();
+
+            crate_changes.push(CrateChange {
+                name: crate_name.to_string(),
+                size_before,
+                size_after,
+            });
+        }
 
         Ok(AnalysisComparison {
             file_size_diff,
@@ -818,6 +1018,7 @@ fn collect_elf_data(
         symbols,
         file_size: 0,
         text_size,
+        enriched_symbols: None,
         section_name: Some(section_name.to_owned()),
         llvm_ir_data: None,
     };
@@ -831,6 +1032,7 @@ fn collect_macho_data(data: &[u8]) -> Result<AnalysisResult, BloatError> {
         symbols,
         file_size: 0,
         text_size,
+        enriched_symbols: None,
         section_name: None,
         llvm_ir_data: None,
     };
@@ -862,6 +1064,7 @@ fn collect_pe_data(path: &path::Path, data: &[u8]) -> Result<AnalysisResult, Blo
             symbols,
             file_size: 0,
             text_size,
+            enriched_symbols: None,
             section_name: None,
             llvm_ir_data: None,
         })
@@ -992,6 +1195,7 @@ fn collect_pdb_data(pdb_path: &path::Path, text_size: u64) -> Result<AnalysisRes
         symbols,
         file_size: 0,
         text_size,
+        enriched_symbols: None,
         section_name: None,
         llvm_ir_data: None,
     };
