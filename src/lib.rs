@@ -2,6 +2,7 @@
 #![allow(clippy::collapsible_else_if)]
 
 use std::{fmt, fs, path, str};
+use std::process::{Command, Stdio};
 
 use binfarce::ar;
 use binfarce::demangle::SymbolData;
@@ -33,8 +34,55 @@ struct CargoTarget {
     crate_types: Option<Vec<String>>,
 }
 
+// Timing structures for build analysis
+#[derive(Debug, Clone)]
+pub struct TimingInfo {
+    pub crate_name: String,
+    pub duration: f64,
+    pub rmeta_time: Option<f64>,
+}
+
+#[derive(Debug, Facet)]
+struct TimingMessage {
+    reason: String,
+    package_id: String,
+    target: TimingTarget,
+    mode: String,
+    duration: f64,
+    rmeta_time: Option<f64>,
+}
+
+#[derive(Debug, Facet)]
+struct TimingTarget {
+    kind: Vec<String>,
+    crate_types: Vec<String>,
+    name: String,
+    src_path: String,
+    edition: String,
+    doc: bool,
+    doctest: bool,
+    test: bool,
+}
+
 // Re-export important types
 pub use binfarce::demangle::SymbolData as BinarySymbol;
+
+impl TimingInfo {
+    fn parse_from_json_line(line: &str) -> Option<Self> {
+        // Only parse timing-info messages
+        if !line.contains(r#""reason":"timing-info""#) {
+            return None;
+        }
+
+        let timing_msg: TimingMessage = facet_json::from_str(line).ok()?;
+
+        Some(TimingInfo {
+            crate_name: timing_msg.target.name,
+            duration: timing_msg.duration,
+            rmeta_time: timing_msg.rmeta_time,
+        })
+    }
+}
 
 // Core library types that will be moved from main.rs
 #[derive(Debug)]
@@ -61,6 +109,12 @@ pub enum ArtifactKind {
     Binary,
     Library,
     DynLib,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum BuildType {
+    Debug,
+    Release,
 }
 
 #[derive(Debug, Default)]
@@ -105,6 +159,22 @@ pub struct Method {
 pub struct Crate {
     pub name: String,
     pub size: u64,
+}
+
+// Build runner for cargo builds with all analysis features enabled
+#[derive(Debug)]
+pub struct BuildRunner {
+    manifest_path: path::PathBuf,
+    target_dir: path::PathBuf,
+    build_type: BuildType,
+}
+
+// Result of a build run with all parsed data
+#[derive(Debug)]
+pub struct BuildResult {
+    pub context: BuildContext,
+    pub timing_data: Vec<TimingInfo>,
+    pub json_lines: Vec<String>,
 }
 
 // Error types will be moved here
@@ -377,6 +447,95 @@ impl BloatAnalyzer {
     ) -> Result<std::collections::HashMap<String, crate::llvm_ir::LlvmInstantiations>, BloatError> {
         let data = std::fs::read(ll_file_path).map_err(|_| BloatError::OpenFailed(ll_file_path.to_owned()))?;
         Ok(crate::llvm_ir::analyze_llvm_ir_data(&data))
+    }
+}
+
+impl BuildRunner {
+    pub fn new(manifest_path: impl Into<path::PathBuf>, target_dir: impl Into<path::PathBuf>, build_type: BuildType) -> Self {
+        Self {
+            manifest_path: manifest_path.into(),
+            target_dir: target_dir.into(),
+            build_type,
+        }
+    }
+
+    pub fn run(&self) -> Result<BuildResult, BloatError> {
+        // Ensure manifest exists
+        if !self.manifest_path.exists() {
+            return Err(BloatError::OpenFailed(self.manifest_path.clone()));
+        }
+
+        // Build cargo command with all features enabled
+        let mut cmd = Command::new("cargo");
+        cmd.arg("build");
+        
+        // Build examples as well
+        cmd.arg("--examples");
+        
+        // Add build type flag
+        match self.build_type {
+            BuildType::Release => {
+                cmd.arg("--release");
+            }
+            BuildType::Debug => {
+                // Debug is default
+            }
+        }
+        
+        // Add required flags for analysis
+        cmd.args([
+            "--message-format=json",
+            "-Z",
+            "unstable-options",
+            "--timings=json",
+            "--manifest-path",
+        ]);
+        cmd.arg(&self.manifest_path);
+        cmd.arg("--target-dir");
+        cmd.arg(&self.target_dir);
+        
+        // Set environment variables for LLVM IR and timing
+        cmd.env("RUSTFLAGS", "--emit=llvm-ir");
+        cmd.env("RUSTC_BOOTSTRAP", "1");
+        
+        // Execute the build
+        let output = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| BloatError::CargoError(format!("Failed to execute cargo: {}", e)))?;
+        
+        if !output.status.success() {
+            let _stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BloatError::CargoBuildFailed);
+        }
+        
+        // Parse the JSON output
+        let stdout = str::from_utf8(&output.stdout)
+            .map_err(|_| BloatError::InvalidCargoOutput)?;
+        let json_lines: Vec<String> = stdout.lines().map(|s| s.to_string()).collect();
+        let json_line_refs: Vec<&str> = json_lines.iter().map(|s| s.as_str()).collect();
+        
+        // Parse timing data
+        let mut timing_data = Vec::new();
+        for line in &json_lines {
+            if let Some(timing) = TimingInfo::parse_from_json_line(line) {
+                timing_data.push(timing);
+            }
+        }
+        
+        // Parse build context
+        let context = BloatAnalyzer::from_cargo_metadata(
+            &json_line_refs,
+            &self.target_dir,
+            None, // auto-detect target triple
+        )?;
+        
+        Ok(BuildResult {
+            context,
+            timing_data,
+            json_lines,
+        })
     }
 }
 

@@ -15,56 +15,7 @@
 use camino::Utf8PathBuf;
 use std::collections::HashMap;
 use std::fs;
-use std::process::Command;
-use substance::{AnalysisConfig, ArtifactKind, BloatAnalyzer};
-
-#[derive(Debug)]
-struct TimingInfo {
-    crate_name: String,
-    duration: f64,
-    rmeta_time: Option<f64>,
-}
-
-#[derive(Debug, facet::Facet)]
-#[facet(name = "timing_message")]
-struct TimingMessage {
-    reason: String,
-    package_id: String,
-    target: Target,
-    mode: String,
-    duration: f64,
-    rmeta_time: Option<f64>,
-}
-
-#[derive(Debug, facet::Facet)]
-#[facet(name = "target")]
-struct Target {
-    kind: Vec<String>,
-    crate_types: Vec<String>,
-    name: String,
-    src_path: String,
-    edition: String,
-    doc: bool,
-    doctest: bool,
-    test: bool,
-}
-
-impl TimingInfo {
-    fn parse_from_json_line(line: &str) -> Option<Self> {
-        // Only parse timing-info messages
-        if !line.contains(r#""reason":"timing-info""#) {
-            return None;
-        }
-
-        let timing_msg: TimingMessage = facet_json::from_str(line).ok()?;
-
-        Some(TimingInfo {
-            crate_name: timing_msg.target.name,
-            duration: timing_msg.duration,
-            rmeta_time: timing_msg.rmeta_time,
-        })
-    }
-}
+use substance::{AnalysisConfig, ArtifactKind, BloatAnalyzer, BuildRunner, BuildType};
 
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
@@ -134,64 +85,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let temp_target_dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
         .expect("temp dir is not UTF-8")
         .join(format!("substance_timing_{}", std::process::id()));
-    println!("🔨 Building project with JSON output in temporary directory...");
+    println!("🔨 Building project with analysis features enabled...");
     println!("📁 Using target dir: {}", temp_target_dir);
 
     // Ensure cleanup happens even on early return
     let _cleanup_guard = CleanupGuard::new(temp_target_dir.clone());
 
-    // Step 1: Run cargo build with JSON output for examples, LLVM IR emission, and timing data
-    let output = Command::new("cargo")
-        .args([
-            "build",
-            "--examples",
-            "--message-format=json",
-            "-Z",
-            "unstable-options",
-            "--timings=json",
-            "--target-dir",
-        ])
-        .arg(&temp_target_dir)
-        .env("RUSTFLAGS", "--emit=llvm-ir")
-        .env("RUSTC_BOOTSTRAP", "1")
-        .output()?;
-
-    if !output.status.success() {
-        eprintln!("❌ Cargo build failed");
-        eprintln!(
-            "stdout: {}",
-            std::str::from_utf8(&output.stdout).unwrap_or("<invalid utf8>")
-        );
-        eprintln!(
-            "stderr: {}",
-            std::str::from_utf8(&output.stderr).unwrap_or("<invalid utf8>")
-        );
-        std::process::exit(1);
-    }
-
-    let stdout = std::str::from_utf8(&output.stdout)?;
-    let json_lines: Vec<&str> = stdout.lines().collect();
+    // Use the new BuildRunner API
+    let build_result = BuildRunner::new(
+        "Cargo.toml",
+        temp_target_dir.as_std_path(),
+        BuildType::Debug,
+    )
+    .run()?;
 
     println!("✅ Build completed successfully");
 
-    // Step 2: Parse timing data
-    println!("⏱️  Parsing timing data...");
-    let mut timing_data: Vec<TimingInfo> = Vec::new();
-    for line in &json_lines {
-        if let Some(timing) = TimingInfo::parse_from_json_line(line) {
-            timing_data.push(timing);
-        }
-    }
+    let context = build_result.context;
+    let mut timing_data = build_result.timing_data;
 
     println!("Found {} crates with timing data", timing_data.len());
-
-    // Step 3: Parse cargo metadata using the library
-    println!("📊 Parsing cargo metadata...");
-    let context = BloatAnalyzer::from_cargo_metadata(
-        &json_lines,
-        temp_target_dir.as_std_path(),
-        None, // auto-detect target triple
-    )?;
 
     println!("Target triple: {}", context.target_triple);
     println!("Found {} artifacts", context.artifacts.len());
