@@ -89,7 +89,7 @@ let build_result = BuildRunner::new(
 // - json_lines: Vec<String> for additional processing
 ```
 
-### Analysis Comparison API (Planned)
+### Analysis Comparison API
 Compare two analysis results to track size changes:
 
 ```rust
@@ -129,14 +129,19 @@ symbol_changes.sort_by(|a, b| {
 });
 ```
 
-### Comparison Types (Planned)
+### Comparison Types
 ```rust
 pub struct AnalysisComparison {
-    pub before: &AnalysisResult,
-    pub after: &AnalysisResult,
     pub file_size_diff: FileSizeDiff,
     pub symbol_changes: Vec<SymbolChange>,  // ALL symbols
     pub crate_changes: Vec<CrateChange>,    // ALL crates
+}
+
+pub struct FileSizeDiff {
+    pub file_size_before: u64,
+    pub file_size_after: u64,
+    pub text_size_before: u64,
+    pub text_size_after: u64,
 }
 
 pub struct SymbolChange {
