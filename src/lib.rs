@@ -177,6 +177,37 @@ pub struct BuildResult {
     pub json_lines: Vec<String>,
 }
 
+// Analysis comparison types
+#[derive(Debug)]
+pub struct AnalysisComparison {
+    pub file_size_diff: FileSizeDiff,
+    pub symbol_changes: Vec<SymbolChange>,
+    pub crate_changes: Vec<CrateChange>,
+}
+
+#[derive(Debug)]
+pub struct FileSizeDiff {
+    pub file_size_before: u64,
+    pub file_size_after: u64,
+    pub text_size_before: u64,
+    pub text_size_after: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SymbolChange {
+    pub name: String,
+    pub demangled: String,
+    pub size_before: Option<u64>,
+    pub size_after: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CrateChange {
+    pub name: String,
+    pub size_before: Option<u64>,
+    pub size_after: Option<u64>,
+}
+
 // Error types will be moved here
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
@@ -557,6 +588,101 @@ impl BuildContext {
 
     pub fn minimal(_target_triple: &str) -> Result<Self, BloatError> {
         todo!("Will be implemented in step 9")
+    }
+}
+
+impl SymbolChange {
+    pub fn percent_change(&self) -> Option<f64> {
+        match (self.size_before, self.size_after) {
+            (Some(before), Some(after)) if before > 0 => {
+                Some(((after as f64 - before as f64) / before as f64) * 100.0)
+            }
+            _ => None,
+        }
+    }
+    
+    pub fn absolute_change(&self) -> Option<i64> {
+        match (self.size_before, self.size_after) {
+            (Some(before), Some(after)) => Some(after as i64 - before as i64),
+            _ => None,
+        }
+    }
+}
+
+impl CrateChange {
+    pub fn percent_change(&self) -> Option<f64> {
+        match (self.size_before, self.size_after) {
+            (Some(before), Some(after)) if before > 0 => {
+                Some(((after as f64 - before as f64) / before as f64) * 100.0)
+            }
+            _ => None,
+        }
+    }
+    
+    pub fn absolute_change(&self) -> Option<i64> {
+        match (self.size_before, self.size_after) {
+            (Some(before), Some(after)) => Some(after as i64 - before as i64),
+            _ => None,
+        }
+    }
+}
+
+impl AnalysisComparison {
+    pub fn compare(before: &AnalysisResult, after: &AnalysisResult) -> Result<Self, BloatError> {
+        // Create file size diff
+        let file_size_diff = FileSizeDiff {
+            file_size_before: before.file_size,
+            file_size_after: after.file_size,
+            text_size_before: before.text_size,
+            text_size_after: after.text_size,
+        };
+        
+        // Compare symbols
+        let mut symbol_changes = Vec::new();
+        let mut before_symbols = std::collections::HashMap::new();
+        let mut after_symbols = std::collections::HashMap::new();
+        
+        // Index symbols by name for efficient lookup
+        for symbol in &before.symbols {
+            before_symbols.insert(symbol.name.complete.clone(), symbol);
+        }
+        for symbol in &after.symbols {
+            after_symbols.insert(symbol.name.complete.clone(), symbol);
+        }
+        
+        // Find changes in existing symbols
+        for (name, before_sym) in &before_symbols {
+            let after_sym = after_symbols.get(name);
+            symbol_changes.push(SymbolChange {
+                name: name.clone(),
+                demangled: before_sym.name.trimmed.clone(),
+                size_before: Some(before_sym.size),
+                size_after: after_sym.map(|s| s.size),
+            });
+        }
+        
+        // Find new symbols
+        for (name, after_sym) in &after_symbols {
+            if !before_symbols.contains_key(name) {
+                symbol_changes.push(SymbolChange {
+                    name: name.clone(),
+                    demangled: after_sym.name.trimmed.clone(),
+                    size_before: None,
+                    size_after: Some(after_sym.size),
+                });
+            }
+        }
+        
+        // Compare crates
+        // This requires analyzing symbols and grouping by crate
+        // For now, we'll leave crate_changes empty and implement it properly later
+        let crate_changes = Vec::new();
+        
+        Ok(AnalysisComparison {
+            file_size_diff,
+            symbol_changes,
+            crate_changes,
+        })
     }
 }
 

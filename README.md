@@ -18,6 +18,43 @@ See the original cargo-bloat: <https://github.com/RazrFalcon/cargo-bloat>
 
 ## Quick Start
 
+### Using BuildRunner (Recommended)
+
+```rust
+use substance::{BuildRunner, BuildType, ArtifactKind};
+use std::path::PathBuf;
+
+// Run build with all analysis features enabled
+let build_result = BuildRunner::new(
+    "Cargo.toml",
+    PathBuf::from("target"),
+    BuildType::Release
+).run()?;
+
+// Access build context and timing data
+println!("Target: {}", build_result.context.target_triple);
+println!("Build timing: {} crates", build_result.timing_data.len());
+
+// Find and analyze a specific binary
+let binary_artifact = build_result.context.artifacts.iter()
+    .find(|a| a.kind == ArtifactKind::Binary && a.name == "my_binary")
+    .unwrap();
+
+// Analyze the binary (to be added: automatic analysis in BuildResult)
+use substance::{BloatAnalyzer, AnalysisConfig};
+let config = AnalysisConfig::default();
+let result = BloatAnalyzer::analyze_binary(
+    &binary_artifact.path,
+    &build_result.context,
+    &config
+)?;
+
+println!("File size: {} bytes", result.file_size);
+println!("Symbol count: {}", result.symbols.len());
+```
+
+### Manual Cargo Integration
+
 ```rust
 use substance::{BloatAnalyzer, AnalysisConfig, ArtifactKind};
 use std::process::Command;
@@ -98,12 +135,62 @@ for (crate_name, &size) in crate_list.iter().take(10) {
 - **`BuildContext`** - Contains crate mappings and target information
 - **`AnalysisResult`** - Analysis results with symbols and size information
 - **`AnalysisConfig`** - Configuration for analysis behavior
+- **`BuildRunner`** - Simplified API for running cargo builds with all analysis features
+- **`BuildResult`** - Contains build context, timing data, and analysis results
 
 ### Key Methods
 
 - **`BloatAnalyzer::from_cargo_metadata()`** - Create build context from cargo JSON
 - **`BloatAnalyzer::analyze_binary()`** - Analyze a binary file for symbols
 - **`crate_name::from_sym()`** - Map symbol to originating crate
+- **`BuildRunner::new()`** - Create a new build runner
+- **`BuildRunner::run()`** - Execute build with all analysis features
+
+### Analysis Comparison API (Coming Soon)
+
+Compare two analysis results to track size changes:
+
+```rust
+// Build debug and release versions
+let debug_build = BuildRunner::new("Cargo.toml", target_dir, BuildType::Debug).run()?;
+let release_build = BuildRunner::new("Cargo.toml", target_dir, BuildType::Release).run()?;
+
+// Find and analyze binaries
+let debug_binary = debug_build.context.artifacts.iter()
+    .find(|a| a.kind == ArtifactKind::Binary && a.name == "my_binary")
+    .unwrap();
+let release_binary = release_build.context.artifacts.iter()
+    .find(|a| a.kind == ArtifactKind::Binary && a.name == "my_binary")
+    .unwrap();
+
+let config = AnalysisConfig::default();
+let debug_analysis = BloatAnalyzer::analyze_binary(&debug_binary.path, &debug_build.context, &config)?;
+let release_analysis = BloatAnalyzer::analyze_binary(&release_binary.path, &release_build.context, &config)?;
+
+// Compare analyses
+let comparison = AnalysisComparison::compare(&debug_analysis, &release_analysis)?;
+
+// Sort crates by relative change
+let mut crate_changes = comparison.crate_changes.clone();
+crate_changes.sort_by(|a, b| {
+    let a_pct = a.percent_change().map(|p| p.abs()).unwrap_or(0.0);
+    let b_pct = b.percent_change().map(|p| p.abs()).unwrap_or(0.0);
+    b_pct.partial_cmp(&a_pct).unwrap()
+});
+
+// Display biggest changes
+for change in crate_changes.iter().take(10) {
+    match (change.size_before, change.size_after) {
+        (Some(before), Some(after)) => {
+            let pct = change.percent_change().unwrap();
+            println!("{:+6.1}% {} ({}B → {}B)", pct, change.name, before, after);
+        }
+        (None, Some(after)) => println!("  NEW   {} ({}B)", change.name, after),
+        (Some(before), None) => println!("REMOVED {} (was {}B)", change.name, before),
+        _ => {}
+    }
+}
+```
 
 ## Example Usage
 
@@ -115,6 +202,9 @@ cargo run --example simple_analysis
 
 # Full cargo integration workflow with timing analysis
 cargo run --example analyze_binary
+
+# Compare debug and release builds (coming soon)
+cargo run --example compare_builds
 ```
 
 These examples demonstrate:
@@ -126,6 +216,7 @@ These examples demonstrate:
 - Displaying largest symbols and crates
 - **LLVM IR complexity analysis** when built with `--emit=llvm-ir`
 - Formatting size information
+- **Build comparison** between debug and release configurations (`compare_builds` - coming soon)
 
 Example output from `analyze_binary` (includes timing analysis):
 ```

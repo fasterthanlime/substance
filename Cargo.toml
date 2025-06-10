@@ -20,6 +20,10 @@ path = "examples/analyze_binary.rs"
 name = "simple_analysis"
 path = "examples/simple_analysis.rs"
 
+[[example]]
+name = "compare_builds"
+path = "examples/compare_builds.rs"
+
 [profile.release]
 strip = "debuginfo"
 lto = "thin"
