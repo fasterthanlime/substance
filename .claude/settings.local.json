@@ -10,7 +10,8 @@
       "Bash(cargo test:*)",
       "WebFetch(domain:github.com)",
       "Bash(RUSTC_BOOTSTRAP=1 cargo build --timings=json --message-format=json 2 > /dev/null)",
-      "Bash(cargo clean:*)"
+      "Bash(cargo clean:*)",
+      "Bash(git commit:*)"
     ],
     "deny": []
   }
