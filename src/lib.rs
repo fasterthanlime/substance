@@ -13,6 +13,7 @@ use binfarce::pe;
 use binfarce::ByteOrder;
 use binfarce::Format;
 use facet::Facet;
+use log::{debug, info, warn, error};
 use multimap::MultiMap;
 
 pub mod crate_name;
@@ -161,12 +162,37 @@ pub struct Crate {
     pub size: u64,
 }
 
+// Build options for controlling what gets built
+#[derive(Debug, Clone)]
+pub struct BuildOptions {
+    /// Build examples (--examples flag)
+    pub build_examples: bool,
+    /// Build all bins (--bins flag)
+    pub build_bins: bool,
+    /// Build specific bin (--bin NAME)
+    pub build_bin: Option<String>,
+    /// Build all targets (--all-targets)
+    pub build_all_targets: bool,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            build_examples: false,
+            build_bins: false,
+            build_bin: None,
+            build_all_targets: false,
+        }
+    }
+}
+
 // Build runner for cargo builds with all analysis features enabled
 #[derive(Debug)]
 pub struct BuildRunner {
     manifest_path: path::PathBuf,
     target_dir: path::PathBuf,
     build_type: BuildType,
+    build_options: BuildOptions,
 }
 
 // Result of a build run with all parsed data
@@ -316,17 +342,23 @@ impl BloatAnalyzer {
 
         // Parse cargo JSON messages to extract artifacts
         let mut artifacts = Vec::new();
-        for line in json_messages {
+        
+        info!("Parsing {} JSON messages from cargo", json_messages.len());
+        
+        for (i, line) in json_messages.iter().enumerate() {
             let build: CargoMessage = facet_json::from_str(line).map_err(|e| {
-                eprintln!("Failed to parse JSON line: {}", line);
-                eprintln!("Error: {:?}", e);
+                error!("Failed to parse JSON line {}: {}", i, line);
+                error!("Error: {:?}", e);
                 BloatError::InvalidCargoOutput
             })?;
 
             // Only process compiler-artifact messages
             if build.reason.as_deref() != Some("compiler-artifact") {
+                debug!("Skipping message {}: reason = {:?}", i, build.reason);
                 continue;
             }
+            
+            debug!("Found compiler-artifact message at line {}", i);
 
             if let Some(target) = &build.target {
                 if let Some(target_name) = &target.name {
@@ -341,11 +373,14 @@ impl BloatAnalyzer {
                                 _ => continue, // Simply ignore.
                             };
 
-                            artifacts.push(Artifact {
+                            let artifact = Artifact {
                                 kind,
                                 name: target_name.replace('-', "_"),
                                 path: path::PathBuf::from(path),
-                            });
+                            };
+                            
+                            info!("Found artifact: {:?} - {} at {}", artifact.kind, artifact.name, path);
+                            artifacts.push(artifact);
                         }
                     }
                 }
@@ -353,6 +388,8 @@ impl BloatAnalyzer {
         }
 
         if artifacts.is_empty() {
+            error!("No artifacts found in cargo build output");
+            warn!("Make sure the project builds successfully and produces binaries or libraries");
             return Err(BloatError::NoArtifacts);
         }
 
@@ -487,21 +524,47 @@ impl BuildRunner {
             manifest_path: manifest_path.into(),
             target_dir: target_dir.into(),
             build_type,
+            build_options: BuildOptions::default(),
         }
+    }
+    
+    /// Set custom build options
+    pub fn with_options(mut self, options: BuildOptions) -> Self {
+        self.build_options = options;
+        self
     }
 
     pub fn run(&self) -> Result<BuildResult, BloatError> {
         // Ensure manifest exists
         if !self.manifest_path.exists() {
+            error!("Manifest file not found: {:?}", self.manifest_path);
             return Err(BloatError::OpenFailed(self.manifest_path.clone()));
         }
+
+        info!("Building project from manifest: {:?}", self.manifest_path);
+        info!("Target directory: {:?}", self.target_dir);
+        info!("Build type: {:?}", self.build_type);
+        info!("Build options: {:?}", self.build_options);
 
         // Build cargo command with all features enabled
         let mut cmd = Command::new("cargo");
         cmd.arg("build");
         
-        // Build examples as well
-        cmd.arg("--examples");
+        // Add build target flags based on options
+        if self.build_options.build_all_targets {
+            cmd.arg("--all-targets");
+        } else {
+            if self.build_options.build_examples {
+                cmd.arg("--examples");
+            }
+            if self.build_options.build_bins {
+                cmd.arg("--bins");
+            }
+            if let Some(ref bin_name) = self.build_options.build_bin {
+                cmd.arg("--bin");
+                cmd.arg(bin_name);
+            }
+        }
         
         // Add build type flag
         match self.build_type {
@@ -529,17 +592,27 @@ impl BuildRunner {
         cmd.env("RUSTFLAGS", "--emit=llvm-ir");
         cmd.env("RUSTC_BOOTSTRAP", "1");
         
+        // Log the full command
+        info!("Executing cargo command: {:?}", cmd);
+        
         // Execute the build
         let output = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .map_err(|e| BloatError::CargoError(format!("Failed to execute cargo: {}", e)))?;
+            .map_err(|e| {
+                error!("Failed to execute cargo: {}", e);
+                BloatError::CargoError(format!("Failed to execute cargo: {}", e))
+            })?;
         
         if !output.status.success() {
-            let _stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("Cargo build failed with status: {:?}", output.status);
+            error!("Stderr output:\n{}", stderr);
             return Err(BloatError::CargoBuildFailed);
         }
+        
+        info!("Cargo build completed successfully");
         
         // Parse the JSON output
         let stdout = str::from_utf8(&output.stdout)

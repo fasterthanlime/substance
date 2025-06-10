@@ -13,7 +13,7 @@
 use camino::Utf8PathBuf;
 use std::collections::HashMap;
 use std::fs;
-use substance::{AnalysisComparison, AnalysisConfig, ArtifactKind, BloatAnalyzer, BuildRunner, BuildType};
+use substance::{AnalysisComparison, AnalysisConfig, ArtifactKind, BloatAnalyzer, BuildRunner, BuildType, BuildOptions};
 
 struct CleanupGuard {
     temp_dir: Utf8PathBuf,
@@ -78,11 +78,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build debug version
     println!("\n🐛 Building debug version...");
+    let mut build_options = BuildOptions::default();
+    build_options.build_examples = true;  // Build examples for this comparison
+    
     let debug_build = BuildRunner::new(
         "Cargo.toml",
         temp_target_dir.as_std_path(),
         BuildType::Debug,
     )
+    .with_options(build_options.clone())
     .run()?;
     println!("✅ Debug build completed");
 
@@ -93,6 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         temp_target_dir.as_std_path(),
         BuildType::Release,
     )
+    .with_options(build_options)
     .run()?;
     println!("✅ Release build completed");
 

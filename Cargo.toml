@@ -36,6 +36,7 @@ memmap2 = "0.9"
 multimap = { version = "0.10", default-features = false }
 binfarce = "0.2.1"
 pdb = "0.8.0"
+log = "0.4"
 
 [dev-dependencies]
 camino = "1.1"

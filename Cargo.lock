@@ -265,6 +265,7 @@ dependencies = [
  "camino",
  "facet",
  "facet-json",
+ "log",
  "memmap2",
  "multimap",
  "pdb",
