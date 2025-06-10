@@ -1,8 +1,8 @@
 #![allow(clippy::collapsible_if)]
 #![allow(clippy::collapsible_else_if)]
 
-use std::{fmt, fs, path, str};
 use std::process::{Command, Stdio};
+use std::{fmt, fs, path, str};
 
 use binfarce::ar;
 use binfarce::demangle::SymbolData;
@@ -13,7 +13,7 @@ use binfarce::pe;
 use binfarce::ByteOrder;
 use binfarce::Format;
 use facet::Facet;
-use log::{debug, info, warn, error};
+use log::{debug, error, info, warn};
 use multimap::MultiMap;
 
 pub mod crate_name;
@@ -163,7 +163,7 @@ pub struct Crate {
 }
 
 // Build options for controlling what gets built
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct BuildOptions {
     /// Build examples (--examples flag)
     pub build_examples: bool,
@@ -173,17 +173,6 @@ pub struct BuildOptions {
     pub build_bin: Option<String>,
     /// Build all targets (--all-targets)
     pub build_all_targets: bool,
-}
-
-impl Default for BuildOptions {
-    fn default() -> Self {
-        Self {
-            build_examples: false,
-            build_bins: false,
-            build_bin: None,
-            build_all_targets: false,
-        }
-    }
 }
 
 // Build runner for cargo builds with all analysis features enabled
@@ -342,9 +331,9 @@ impl BloatAnalyzer {
 
         // Parse cargo JSON messages to extract artifacts
         let mut artifacts = Vec::new();
-        
+
         info!("Parsing {} JSON messages from cargo", json_messages.len());
-        
+
         for (i, line) in json_messages.iter().enumerate() {
             let build: CargoMessage = facet_json::from_str(line).map_err(|e| {
                 error!("Failed to parse JSON line {}: {}", i, line);
@@ -357,7 +346,7 @@ impl BloatAnalyzer {
                 debug!("Skipping message {}: reason = {:?}", i, build.reason);
                 continue;
             }
-            
+
             debug!("Found compiler-artifact message at line {}", i);
 
             if let Some(target) = &build.target {
@@ -378,8 +367,11 @@ impl BloatAnalyzer {
                                 name: target_name.replace('-', "_"),
                                 path: path::PathBuf::from(path),
                             };
-                            
-                            info!("Found artifact: {:?} - {} at {}", artifact.kind, artifact.name, path);
+
+                            info!(
+                                "Found artifact: {:?} - {} at {}",
+                                artifact.kind, artifact.name, path
+                            );
                             artifacts.push(artifact);
                         }
                     }
@@ -440,14 +432,18 @@ impl BloatAnalyzer {
     ) -> Result<AnalysisResult, BloatError> {
         let section_name = config.symbols_section.as_deref().unwrap_or(".text");
         let mut result = collect_self_data(binary_path, section_name)?;
-        
+
         // Optionally add LLVM IR analysis
         if config.analyze_llvm_ir {
-            let target_dir = config.target_dir.as_deref().unwrap_or(path::Path::new("target"));
-            let crate_name = binary_path.file_stem()
+            let target_dir = config
+                .target_dir
+                .as_deref()
+                .unwrap_or(path::Path::new("target"));
+            let crate_name = binary_path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .map(|s| s.split('-').next().unwrap_or(s));
-            
+
             match Self::analyze_llvm_ir_from_target_dir(target_dir, crate_name) {
                 Ok(llvm_analysis) => {
                     result.llvm_ir_data = Some(llvm_analysis);
@@ -458,7 +454,7 @@ impl BloatAnalyzer {
                 }
             }
         }
-        
+
         Ok(result)
     }
 
@@ -475,10 +471,11 @@ impl BloatAnalyzer {
         crate_name: Option<&str>,
     ) -> Result<LlvmIrAnalysis, BloatError> {
         let ll_files = find_llvm_ir_files(target_dir, crate_name)?;
-        
+
         if ll_files.is_empty() {
             return Err(BloatError::CargoError(
-                "No LLVM IR files found. Make sure to build with RUSTFLAGS='--emit=llvm-ir'".to_string()
+                "No LLVM IR files found. Make sure to build with RUSTFLAGS='--emit=llvm-ir'"
+                    .to_string(),
             ));
         }
 
@@ -487,9 +484,10 @@ impl BloatAnalyzer {
         let mut total_copies = 0;
 
         for ll_file in &ll_files {
-            let data = std::fs::read(ll_file).map_err(|_| BloatError::OpenFailed(ll_file.clone()))?;
+            let data =
+                std::fs::read(ll_file).map_err(|_| BloatError::OpenFailed(ll_file.clone()))?;
             let instantiations = crate::llvm_ir::analyze_llvm_ir_data(&data);
-            
+
             for (func_name, stats) in instantiations {
                 let entry = combined_instantiations
                     .entry(func_name)
@@ -512,14 +510,20 @@ impl BloatAnalyzer {
     /// Analyze a single LLVM IR file
     pub fn analyze_llvm_ir_file(
         ll_file_path: &path::Path,
-    ) -> Result<std::collections::HashMap<String, crate::llvm_ir::LlvmInstantiations>, BloatError> {
-        let data = std::fs::read(ll_file_path).map_err(|_| BloatError::OpenFailed(ll_file_path.to_owned()))?;
+    ) -> Result<std::collections::HashMap<String, crate::llvm_ir::LlvmInstantiations>, BloatError>
+    {
+        let data = std::fs::read(ll_file_path)
+            .map_err(|_| BloatError::OpenFailed(ll_file_path.to_owned()))?;
         Ok(crate::llvm_ir::analyze_llvm_ir_data(&data))
     }
 }
 
 impl BuildRunner {
-    pub fn new(manifest_path: impl Into<path::PathBuf>, target_dir: impl Into<path::PathBuf>, build_type: BuildType) -> Self {
+    pub fn new(
+        manifest_path: impl Into<path::PathBuf>,
+        target_dir: impl Into<path::PathBuf>,
+        build_type: BuildType,
+    ) -> Self {
         Self {
             manifest_path: manifest_path.into(),
             target_dir: target_dir.into(),
@@ -527,7 +531,7 @@ impl BuildRunner {
             build_options: BuildOptions::default(),
         }
     }
-    
+
     /// Set custom build options
     pub fn with_options(mut self, options: BuildOptions) -> Self {
         self.build_options = options;
@@ -549,7 +553,7 @@ impl BuildRunner {
         // Build cargo command with all features enabled
         let mut cmd = Command::new("cargo");
         cmd.arg("build");
-        
+
         // Add build target flags based on options
         if self.build_options.build_all_targets {
             cmd.arg("--all-targets");
@@ -565,7 +569,7 @@ impl BuildRunner {
                 cmd.arg(bin_name);
             }
         }
-        
+
         // Add build type flag
         match self.build_type {
             BuildType::Release => {
@@ -575,7 +579,7 @@ impl BuildRunner {
                 // Debug is default
             }
         }
-        
+
         // Add required flags for analysis
         cmd.args([
             "--message-format=json",
@@ -587,14 +591,14 @@ impl BuildRunner {
         cmd.arg(&self.manifest_path);
         cmd.arg("--target-dir");
         cmd.arg(&self.target_dir);
-        
+
         // Set environment variables for LLVM IR and timing
         cmd.env("RUSTFLAGS", "--emit=llvm-ir");
         cmd.env("RUSTC_BOOTSTRAP", "1");
-        
+
         // Log the full command
         info!("Executing cargo command: {:?}", cmd);
-        
+
         // Execute the build
         let output = cmd
             .stdout(Stdio::piped())
@@ -604,22 +608,21 @@ impl BuildRunner {
                 error!("Failed to execute cargo: {}", e);
                 BloatError::CargoError(format!("Failed to execute cargo: {}", e))
             })?;
-        
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("Cargo build failed with status: {:?}", output.status);
             error!("Stderr output:\n{}", stderr);
             return Err(BloatError::CargoBuildFailed);
         }
-        
+
         info!("Cargo build completed successfully");
-        
+
         // Parse the JSON output
-        let stdout = str::from_utf8(&output.stdout)
-            .map_err(|_| BloatError::InvalidCargoOutput)?;
+        let stdout = str::from_utf8(&output.stdout).map_err(|_| BloatError::InvalidCargoOutput)?;
         let json_lines: Vec<String> = stdout.lines().map(|s| s.to_string()).collect();
         let json_line_refs: Vec<&str> = json_lines.iter().map(|s| s.as_str()).collect();
-        
+
         // Parse timing data
         let mut timing_data = Vec::new();
         for line in &json_lines {
@@ -627,14 +630,14 @@ impl BuildRunner {
                 timing_data.push(timing);
             }
         }
-        
+
         // Parse build context
         let context = BloatAnalyzer::from_cargo_metadata(
             &json_line_refs,
             &self.target_dir,
             None, // auto-detect target triple
         )?;
-        
+
         Ok(BuildResult {
             context,
             timing_data,
@@ -673,7 +676,7 @@ impl SymbolChange {
             _ => None,
         }
     }
-    
+
     pub fn absolute_change(&self) -> Option<i64> {
         match (self.size_before, self.size_after) {
             (Some(before), Some(after)) => Some(after as i64 - before as i64),
@@ -691,7 +694,7 @@ impl CrateChange {
             _ => None,
         }
     }
-    
+
     pub fn absolute_change(&self) -> Option<i64> {
         match (self.size_before, self.size_after) {
             (Some(before), Some(after)) => Some(after as i64 - before as i64),
@@ -709,12 +712,12 @@ impl AnalysisComparison {
             text_size_before: before.text_size,
             text_size_after: after.text_size,
         };
-        
+
         // Compare symbols
         let mut symbol_changes = Vec::new();
         let mut before_symbols = std::collections::HashMap::new();
         let mut after_symbols = std::collections::HashMap::new();
-        
+
         // Index symbols by name for efficient lookup
         for symbol in &before.symbols {
             before_symbols.insert(symbol.name.complete.clone(), symbol);
@@ -722,7 +725,7 @@ impl AnalysisComparison {
         for symbol in &after.symbols {
             after_symbols.insert(symbol.name.complete.clone(), symbol);
         }
-        
+
         // Find changes in existing symbols
         for (name, before_sym) in &before_symbols {
             let after_sym = after_symbols.get(name);
@@ -733,7 +736,7 @@ impl AnalysisComparison {
                 size_after: after_sym.map(|s| s.size),
             });
         }
-        
+
         // Find new symbols
         for (name, after_sym) in &after_symbols {
             if !before_symbols.contains_key(name) {
@@ -745,12 +748,12 @@ impl AnalysisComparison {
                 });
             }
         }
-        
+
         // Compare crates
         // This requires analyzing symbols and grouping by crate
         // For now, we'll leave crate_changes empty and implement it properly later
         let crate_changes = Vec::new();
-        
+
         Ok(AnalysisComparison {
             file_size_diff,
             symbol_changes,
@@ -1097,9 +1100,12 @@ fn get_default_target() -> Result<String, BloatError> {
 }
 
 /// Find LLVM IR (.ll) files in the target directory
-fn find_llvm_ir_files(target_dir: &path::Path, crate_name: Option<&str>) -> Result<Vec<path::PathBuf>, BloatError> {
+fn find_llvm_ir_files(
+    target_dir: &path::Path,
+    crate_name: Option<&str>,
+) -> Result<Vec<path::PathBuf>, BloatError> {
     let mut ll_files = Vec::new();
-    
+
     // Search in multiple potential locations within target directory
     let search_dirs = vec![
         target_dir.join("debug"),
@@ -1107,26 +1113,26 @@ fn find_llvm_ir_files(target_dir: &path::Path, crate_name: Option<&str>) -> Resu
         target_dir.join("debug").join("examples"),
         target_dir.join("debug").join("incremental"),
     ];
-    
+
     for search_dir in search_dirs {
         if search_dir.exists() {
             find_ll_files_in_dir(&search_dir, crate_name, &mut ll_files)?;
         }
     }
-    
+
     Ok(ll_files)
 }
 
 fn find_ll_files_in_dir(
-    dir: &path::Path, 
-    crate_name: Option<&str>, 
-    ll_files: &mut Vec<path::PathBuf>
+    dir: &path::Path,
+    crate_name: Option<&str>,
+    ll_files: &mut Vec<path::PathBuf>,
 ) -> Result<(), BloatError> {
     let entries = fs::read_dir(dir).map_err(|_| BloatError::OpenFailed(dir.to_owned()))?;
-    
+
     for entry in entries.flatten() {
         let path = entry.path();
-        
+
         if path.is_dir() {
             // Recursively search subdirectories (like incremental compilation dirs)
             find_ll_files_in_dir(&path, crate_name, ll_files)?;
@@ -1135,7 +1141,8 @@ fn find_ll_files_in_dir(
                 // If crate_name is specified, filter by it
                 if let Some(name) = crate_name {
                     if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if file_stem.starts_with(name) || file_stem.contains(&format!("-{}", name)) {
+                        if file_stem.starts_with(name) || file_stem.contains(&format!("-{}", name))
+                        {
                             ll_files.push(path);
                         }
                     }
@@ -1146,6 +1153,6 @@ fn find_ll_files_in_dir(
             }
         }
     }
-    
+
     Ok(())
 }
