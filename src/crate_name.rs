@@ -1,32 +1,44 @@
-use crate::BuildContext;
+use crate::{
+    types::{CrateName, LlvmFunctionNameRef, MangledSymbolRef},
+    BuildContext,
+};
 use binfarce::demangle::{self, SymbolName};
 
 pub const UNKNOWN: &str = "[Unknown]";
 
-pub fn from_sym(d: &BuildContext, split_std: bool, sym: &SymbolName) -> (String, bool) {
+pub fn from_sym(d: &BuildContext, split_std: bool, sym: &SymbolName) -> (CrateName, bool) {
     let (mut name, is_exact) = from_sym_impl(d, sym);
 
     if !split_std {
         if d.std_crates.contains(&name) {
-            name = "std".to_string();
+            name = CrateName::from("std");
         }
     }
 
     (name, is_exact)
 }
 
-fn from_sym_impl(d: &BuildContext, sym: &SymbolName) -> (String, bool) {
-    if let Some(name) = d.deps_symbols.get(&sym.complete) {
-        return (name.to_string(), true);
+fn from_sym_impl(d: &BuildContext, sym: &SymbolName) -> (CrateName, bool) {
+    if let Some(name) = d
+        .deps_symbols
+        .get(MangledSymbolRef::from_str(&sym.complete))
+    {
+        return (name.clone(), true);
     }
 
     match sym.kind {
-        demangle::Kind::Legacy => parse_sym(d, &sym.complete),
+        demangle::Kind::Legacy => {
+            let (name, is_exact) = parse_sym(d, &sym.complete);
+            (CrateName::from(name), is_exact)
+        }
         demangle::Kind::V0 => match sym.crate_name {
-            Some(ref name) => (name.to_string(), true),
-            None => parse_sym_v0(d, &sym.trimmed),
+            Some(ref name) => (CrateName::from(name.to_string()), true),
+            None => {
+                let (name, is_exact) = parse_sym_v0(d, &sym.trimmed);
+                (CrateName::from(name), is_exact)
+            }
         },
-        demangle::Kind::Unknown => (UNKNOWN.to_string(), true),
+        demangle::Kind::Unknown => (CrateName::from(UNKNOWN.to_string()), true),
     }
 }
 
@@ -62,9 +74,9 @@ fn parse_sym(d: &BuildContext, sym: &str) -> (String, bool) {
                 // so they will be resolved automatically, in other cases it's an UB.
 
                 if let Some(names) = d.deps_symbols.get_vec(sym) {
-                    if names.contains(&crate_name1) {
+                    if names.contains(&CrateName::from(crate_name1.clone())) {
                         crate_name1
-                    } else if names.contains(&crate_name2) {
+                    } else if names.contains(&CrateName::from(crate_name2.clone())) {
                         crate_name2
                     } else {
                         // Example:
@@ -121,7 +133,9 @@ fn parse_sym_v0(d: &BuildContext, sym: &str) -> (String, bool) {
 
     // Check that such crate name is an actual dependency
     // and not some random string.
-    if d.std_crates.contains(&name) || d.dep_crates.contains(&name) {
+    if d.std_crates.contains(&CrateName::from(name.clone()))
+        || d.dep_crates.contains(&CrateName::from(name.clone()))
+    {
         (name, false)
     } else {
         (UNKNOWN.to_string(), true)
@@ -137,7 +151,9 @@ fn parse_sym_v0(d: &BuildContext, sym: &str) -> (String, bool) {
 /// - `<T as alloc::vec::Vec>::method` -> `alloc`
 /// - `core::ptr::drop_in_place` -> `core`
 /// - `_ZN4core3ptr13drop_in_place17h1234567890abcdefE` -> `core`
-pub fn extract_crate_from_function(func_name: &str) -> String {
+pub fn extract_crate_from_function(func_name: &LlvmFunctionNameRef) -> String {
+    let func_name = func_name.as_str();
+
     // Handle generic implementations and trait bounds
     let cleaned = if func_name.starts_with('<') {
         // For functions like "<T as alloc::vec::Vec>::method", extract after "as"
@@ -167,7 +183,7 @@ pub fn extract_crate_from_function(func_name: &str) -> String {
     }
 
     let first_part = parts[0];
-    
+
     // Common Rust standard library crates
     let std_crates = ["core", "alloc", "std", "proc_macro", "test"];
     if std_crates.contains(&first_part) {
@@ -175,7 +191,7 @@ pub fn extract_crate_from_function(func_name: &str) -> String {
     }
 
     // If it's a known crate pattern, return it
-    if !first_part.is_empty() 
+    if !first_part.is_empty()
         && !first_part.starts_with('<')
         && !first_part.starts_with('_')
         && !first_part.chars().all(|c| c.is_numeric())

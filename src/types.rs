@@ -23,9 +23,15 @@ pub struct ByteSize(u64);
 #[strong_type(auto_operators)]
 pub struct BuildTimeSeconds(f64);
 
-/// A strongly-typed crate name (e.g., "serde", "std")
+/// A strongly-typed crate name
 #[braid]
 pub struct CrateName;
+
+impl CrateName {
+    pub(crate) fn from_target_name(target_name: &str) -> Self {
+        CrateName(target_name.to_string().replace('-', "_"))
+    }
+}
 
 /// A mangled symbol name as it appears in the binary (e.g., "_ZN5serde3ser9Serialize9serialize17h...")
 #[braid]
@@ -37,7 +43,7 @@ pub struct DemangledSymbol;
 
 /// The function/method name part of a symbol without the crate path (e.g., "serialize")
 #[braid]
-pub struct FunctionName;
+pub struct LlvmFunctionName;
 
 /// A file path for .ll files
 #[braid]
