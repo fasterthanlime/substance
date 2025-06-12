@@ -16,10 +16,9 @@ use multimap::MultiMap;
 use crate::cargo::{CargoMessage, TimingInfo};
 use crate::env::{collect_rlib_paths, stdlibs_dir};
 use crate::errors::SubstanceError;
-use crate::llvm_ir::analyze_llvm_ir_data;
+use crate::llvm_ir::{analyze_llvm_ir_data, analyze_llvm_ir_from_target_dir};
 use crate::object::{collect_deps_symbols, collect_self_data};
-use crate::reporting::LlvmFunction;
-use crate::types::{ByteSize, CrateName, LlvmFunctionName, MangledSymbol};
+use crate::types::{ByteSize, CrateName, LlvmFunction, LlvmFunctionName, MangledSymbol};
 
 pub mod cargo;
 pub mod crate_name;
@@ -122,62 +121,39 @@ pub struct CrateChange {
     pub size_after: Option<u64>,
 }
 
-/// Analyze LLVM IR files in the target directory
-pub fn analyze_llvm_ir_from_target_dir(
-    target_dir: &Utf8Path,
-) -> Result<HashMap<LlvmFunctionName, LlvmFunction>, SubstanceError> {
-    let ll_files = find_llvm_ir_files(target_dir)?;
-
-    if ll_files.is_empty() {
-        return Err(SubstanceError::CargoError(
-            "No LLVM IR files found. Make sure to build with RUSTFLAGS='--emit=llvm-ir'"
-                .to_string(),
-        ));
-    }
-
-    let results: Vec<Result<HashMap<_, _>, SubstanceError>> = ll_files
-        .par_iter()
-        .map(|ll_file| {
-            let data = std::fs::read(ll_file)
-                .map_err(|_| SubstanceError::OpenFailed(ll_file.clone().into()))?;
-            Ok(analyze_llvm_ir_data(&data))
-        })
-        .collect();
-
-    let mut functions: HashMap<LlvmFunctionName, LlvmFunction> = HashMap::new();
-    for file_result in results {
-        let file_functions = file_result?;
-
-        // Note: for now, if we get the exact same symbols from multiple different .ll files, they'll
-        // override each other.
-        for (key, value) in file_functions {
-            if functions.contains_key(&key) {
-                warn!("Duplicate function '{}' found in multiple LLVM IR files, overriding previous definition", key);
-            }
-            functions.insert(key, value);
-        }
-    }
-
-    Ok(functions)
-}
-
 impl BuildRunner {
     /// Create a new BuildRunner instance.
     pub fn for_manifest(manifest_path: impl Into<Utf8PathBuf>) -> Self {
-        // Generate a temporary directory for the target directory.
-        let tmp_dir = tempfile::Builder::new()
-            .prefix("substance-build-tmp")
-            .tempdir()
-            .expect("Failed to create temporary build directory");
-        let target_dir = Utf8PathBuf::from_path_buf(tmp_dir.path().to_path_buf())
-            .expect("Temporary target_dir is not valid UTF-8");
+        use std::env;
+        // Check if SUBSTANCE_TMP_DIR is set
+        if let Ok(dir) = env::var("SUBSTANCE_TMP_DIR") {
+            let target_dir = Utf8PathBuf::from(dir);
+            info!(
+                "Using SUBSTANCE_TMP_DIR as target directory: {}",
+                target_dir
+            );
+            Self {
+                manifest_path: manifest_path.into(),
+                target_dir,
+                _temp_dir: None,
+                additional_args: Vec::new(),
+            }
+        } else {
+            // Generate a temporary directory for the target directory.
+            let tmp_dir = tempfile::Builder::new()
+                .prefix("substance-build-tmp")
+                .tempdir()
+                .expect("Failed to create temporary build directory");
+            let target_dir = Utf8PathBuf::from_path_buf(tmp_dir.path().to_path_buf())
+                .expect("Temporary target_dir is not valid UTF-8");
 
-        // Store the TempDir so it is kept alive as long as BuildRunner lives.
-        Self {
-            manifest_path: manifest_path.into(),
-            target_dir,
-            _temp_dir: Some(tmp_dir),
-            additional_args: Vec::new(),
+            // Store the TempDir so it is kept alive as long as BuildRunner lives.
+            Self {
+                manifest_path: manifest_path.into(),
+                target_dir,
+                _temp_dir: Some(tmp_dir),
+                additional_args: Vec::new(),
+            }
         }
     }
 
@@ -475,14 +451,7 @@ impl BuildRunner {
 pub fn find_llvm_ir_files(root_dir: &Utf8Path) -> Result<Vec<Utf8PathBuf>, SubstanceError> {
     let mut ll_files = Vec::new();
 
-    let mut walker = WalkBuilder::new(root_dir);
-    if let Some(err) = walker.add_ignore("build") {
-        return Err(SubstanceError::CargoError(format!(
-            "Failed to add ignore for 'build': {}",
-            err
-        )));
-    }
-    let walker = walker.build();
+    let walker = WalkBuilder::new(root_dir).build();
 
     for entry in walker {
         let entry = entry.map_err(|e| {

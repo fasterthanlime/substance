@@ -1,8 +1,11 @@
 use crate::{
-    reporting::LlvmFunction,
-    types::{LlvmFunctionName, LlvmIrLines, NumberOfCopies},
+    errors::SubstanceError,
+    find_llvm_ir_files,
+    types::{LlvmFunction, LlvmFunctionName, LlvmIrLines, NumberOfCopies},
 };
 use binfarce::demangle::SymbolName;
+use camino::Utf8Path;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashMap;
 
 impl LlvmFunction {
@@ -10,6 +13,48 @@ impl LlvmFunction {
         self.copies = NumberOfCopies::new(self.copies.value() + 1);
         self.lines = LlvmIrLines::new(self.lines.value() + lines);
     }
+}
+
+/// Analyze LLVM IR files in the target directory
+pub fn analyze_llvm_ir_from_target_dir(
+    target_dir: &Utf8Path,
+) -> Result<HashMap<LlvmFunctionName, LlvmFunction>, SubstanceError> {
+    let ll_files = find_llvm_ir_files(target_dir)?;
+
+    if ll_files.is_empty() {
+        return Err(SubstanceError::CargoError(
+            "No LLVM IR files found. Make sure to build with RUSTFLAGS='--emit=llvm-ir'"
+                .to_string(),
+        ));
+    }
+
+    let results: Vec<Result<HashMap<_, _>, SubstanceError>> = ll_files
+        .par_iter()
+        .map(|ll_file| {
+            let data = std::fs::read(ll_file)
+                .map_err(|_| SubstanceError::OpenFailed(ll_file.clone().into()))?;
+            Ok(analyze_llvm_ir_data(&data))
+        })
+        .collect();
+
+    let mut functions: HashMap<LlvmFunctionName, LlvmFunction> = HashMap::new();
+    for file_result in results {
+        let file_functions = file_result?;
+
+        // If the same symbol occurs in multiple .ll files, sum up the lines and copies.
+        for (key, value) in file_functions {
+            functions
+                .entry(key)
+                .and_modify(|existing| {
+                    existing.copies =
+                        NumberOfCopies::new(existing.copies.value() + value.copies.value());
+                    existing.lines = LlvmIrLines::new(existing.lines.value() + value.lines.value());
+                })
+                .or_insert(value);
+        }
+    }
+
+    Ok(functions)
 }
 
 pub fn analyze_llvm_ir_data(ir: &[u8]) -> HashMap<LlvmFunctionName, LlvmFunction> {
