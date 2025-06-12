@@ -2,6 +2,8 @@ use camino::Utf8PathBuf;
 use owo_colors::OwoColorize;
 
 fn main() -> Result<(), eyre::Error> {
+    env_logger::init();
+
     let current_exe = Utf8PathBuf::from_path_buf(std::env::current_exe().unwrap()).unwrap();
     let exe_parent = current_exe.parent().unwrap();
     let git_root = String::from_utf8_lossy(
@@ -37,11 +39,11 @@ fn main() -> Result<(), eyre::Error> {
         manifest_path
     );
 
-    let result = substance::BuildRunner::for_manifest(&manifest_path)
-        .arg("--release")
+    let build_context = substance::BuildRunner::for_manifest(&manifest_path)
         .arg("--example")
         .arg("simple")
         .run()?;
+    println!("Global build time: {:?}", build_context.wall_duration);
 
     Ok(())
 }

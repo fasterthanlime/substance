@@ -21,15 +21,6 @@ use crate::types::{
 };
 use std::{collections::HashMap, time::Duration};
 
-/// Available output formats
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReportFormat {
-    /// For CI
-    Markdown,
-    /// With colors, for CLI
-    PlainText,
-}
-
 /// Complete analysis report for a single version
 pub struct BuildReport {
     /// For how long `cargo build` ran

@@ -27,12 +27,6 @@ pub struct BuildTimeSeconds(f64);
 #[braid]
 pub struct CrateName;
 
-impl CrateName {
-    pub(crate) fn from_target_name(target_name: &str) -> Self {
-        CrateName(target_name.to_string().replace('-', "_"))
-    }
-}
-
 /// A mangled symbol name as it appears in the binary (e.g., "_ZN5serde3ser9Serialize9serialize17h...")
 #[braid]
 pub struct MangledSymbol;

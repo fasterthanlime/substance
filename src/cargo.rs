@@ -1,5 +1,3 @@
-use std::convert::TryFrom;
-
 use camino::Utf8PathBuf;
 use facet::Facet;
 
@@ -12,6 +10,7 @@ struct RawCargoMessage {
     reason: String,
 
     /// which target the message is for
+    #[facet(default)]
     target: Option<CargoTarget>,
 
     /// compiler-artifact only
@@ -28,15 +27,15 @@ struct RawCargoMessage {
 }
 
 #[derive(Debug, Facet)]
-pub(crate) struct CargoTarget {
+pub struct CargoTarget {
     /// The name of the build target, something like: "static_assertions", "proc_macro2", etc.
-    pub(crate) name: Option<String>,
+    pub name: Option<String>,
 
     /// kind: ["lib", "bin", etc.]
-    pub(crate) kind: Option<Vec<String>>,
+    pub kind: Option<Vec<String>>,
 
     /// crate_types: ["lib", "bin", etc.]
-    pub(crate) crate_types: Option<Vec<String>>,
+    pub crate_types: Option<Vec<String>>,
 }
 
 // Timing structures for build analysis
@@ -65,51 +64,87 @@ pub(crate) enum CargoMessage {
     CompilerArtifact(CompilerArtifact),
 }
 
-impl TryFrom<RawCargoMessage> for CargoMessage {
-    type Error = &'static str;
+use std::fmt;
 
-    fn try_from(msg: RawCargoMessage) -> Result<Self, Self::Error> {
-        match msg.reason.as_str() {
-            "timing-info" => {
-                let target = msg.target.ok_or("Missing target for timing-info")?;
-                let duration = msg.duration.ok_or("Missing duration for timing-info")?;
-                Ok(CargoMessage::TimingInfo(TimingInfo {
-                    target,
-                    duration,
-                    rmeta_time: msg.rmeta_time,
-                }))
-            }
-            "compiler-artifact" => {
-                let target = msg.target.ok_or("Missing target for compiler-artifact")?;
-                let crate_name = target
-                    .name
-                    .clone()
-                    .ok_or("Missing crate name for compiler-artifact")?
-                    .into();
-                let filenames = msg
-                    .filenames
-                    .ok_or("Missing filenames for compiler-artifact")?
-                    .into_iter()
-                    .map(|s| Utf8PathBuf::from(s))
-                    .collect();
-                Ok(CargoMessage::CompilerArtifact(CompilerArtifact {
-                    crate_name,
-                    filenames,
-                }))
-            }
-            _ => Err("Unknown cargo message reason"),
+#[derive(Debug)]
+pub enum CargoMessageError {
+    UnknownReason(String),
+    MissingTarget { reason: String },
+    MissingDuration,
+    MissingCrateName,
+    MissingFilenames,
+    InvalidJson(String),
+}
+
+impl fmt::Display for CargoMessageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use CargoMessageError::*;
+        match self {
+            UnknownReason(reason) => write!(f, "Unknown cargo message reason: {}", reason),
+            MissingTarget { reason } => write!(f, "Missing target for {}", reason),
+            MissingDuration => write!(f, "Missing duration for timing-info"),
+            MissingCrateName => write!(f, "Missing crate name for compiler-artifact"),
+            MissingFilenames => write!(f, "Missing filenames for compiler-artifact"),
+            InvalidJson(err) => write!(f, "Failed to parse cargo message JSON: {}", err),
         }
     }
 }
+
+impl std::error::Error for CargoMessageError {}
 
 impl CargoMessage {
     /// Parse a Cargo JSON message line into `CargoMessage`.
     ///
     /// This function expects a JSON line as produced by cargo with `-Zunstable-options --message-format=json`.
     /// It uses `facet_json` to parse the line into a `RawCargoMessage`, then converts it using `TryFrom`.
-    pub fn parse(json_line: &str) -> Result<Self, &'static str> {
-        let raw: RawCargoMessage =
-            facet_json::from_str(json_line).map_err(|_| "Failed to parse cargo message JSON")?;
-        CargoMessage::try_from(raw)
+    pub fn parse(json_line: &str) -> Result<Option<Self>, CargoMessageError> {
+        let raw: RawCargoMessage = facet_json::from_str(json_line)
+            .map_err(|e| CargoMessageError::InvalidJson(e.to_string()))?;
+        match raw.reason.as_str() {
+            "timing-info" => {
+                let target = raw.target.ok_or_else(|| CargoMessageError::MissingTarget {
+                    reason: "timing-info".to_string(),
+                })?;
+                let duration = raw.duration.ok_or(CargoMessageError::MissingDuration)?;
+                Ok(Some(CargoMessage::TimingInfo(TimingInfo {
+                    target,
+                    duration,
+                    rmeta_time: raw.rmeta_time,
+                })))
+            }
+            "compiler-artifact" => {
+                let target = raw.target.ok_or_else(|| CargoMessageError::MissingTarget {
+                    reason: "compiler-artifact".to_string(),
+                })?;
+                let crate_name = target
+                    .name
+                    .clone()
+                    .ok_or(CargoMessageError::MissingCrateName)?
+                    .into();
+                let filenames = raw
+                    .filenames
+                    .ok_or(CargoMessageError::MissingFilenames)?
+                    .into_iter()
+                    .map(|s| Utf8PathBuf::from(s))
+                    .collect();
+                Ok(Some(CargoMessage::CompilerArtifact(CompilerArtifact {
+                    crate_name,
+                    filenames,
+                })))
+            }
+            "build-script-executed" => {
+                // ignore
+                Ok(None)
+            }
+            "compiler-message" => {
+                // ignore
+                Ok(None)
+            }
+            "build-finished" => {
+                // ignore
+                Ok(None)
+            }
+            other => Err(CargoMessageError::UnknownReason(other.to_string())),
+        }
     }
 }
