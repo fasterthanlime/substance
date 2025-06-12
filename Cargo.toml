@@ -28,6 +28,12 @@ path = "examples/compare_builds.rs"
 strip = "debuginfo"
 lto = "thin"
 
+[features]
+default = ["formatting"]
+formatting = []
+markdown = []
+cli = ["owo-colors", "indicatif"]
+
 [dependencies]
 # Core library dependencies
 facet = "0.27"
@@ -38,6 +44,12 @@ binfarce = "0.2.1"
 pdb = "0.8.0"
 log = "0.4"
 compact_str = "0.8"
+aliri_braid = "0.4"
+strong-type = "0.7"
+
+# Optional dependencies for enhanced functionality
+owo-colors = { version = "4", optional = true }
+indicatif = { version = "0.17", optional = true }
 
 [dev-dependencies]
 camino = "1.1"

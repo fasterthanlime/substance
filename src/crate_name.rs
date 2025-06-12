@@ -127,3 +127,78 @@ fn parse_sym_v0(d: &BuildContext, sym: &str) -> (String, bool) {
         (UNKNOWN.to_string(), true)
     }
 }
+
+/// Extract crate name from an LLVM IR function name
+///
+/// This is used for analyzing LLVM IR output where function names
+/// have a different format than regular symbol names.
+///
+/// # Examples
+/// - `<T as alloc::vec::Vec>::method` -> `alloc`
+/// - `core::ptr::drop_in_place` -> `core`
+/// - `_ZN4core3ptr13drop_in_place17h1234567890abcdefE` -> `core`
+pub fn extract_crate_from_function(func_name: &str) -> String {
+    // Handle generic implementations and trait bounds
+    let cleaned = if func_name.starts_with('<') {
+        // For functions like "<T as alloc::vec::Vec>::method", extract after "as"
+        if let Some(as_pos) = func_name.find(" as ") {
+            let after_as = &func_name[as_pos + 4..];
+            if let Some(end) = after_as.find(">::") {
+                after_as[..end].to_string()
+            } else if let Some(end) = after_as.find('>') {
+                after_as[..end].to_string()
+            } else {
+                after_as.to_string()
+            }
+        } else if let Some(space_pos) = func_name.find(' ') {
+            // Handle other generic patterns
+            func_name[space_pos + 1..].to_string()
+        } else {
+            func_name.to_string()
+        }
+    } else {
+        func_name.to_string()
+    };
+
+    // Extract the crate name from the cleaned function name
+    let parts: Vec<&str> = cleaned.split("::").collect();
+    if parts.is_empty() {
+        return "unknown".to_string();
+    }
+
+    let first_part = parts[0];
+    
+    // Common Rust standard library crates
+    let std_crates = ["core", "alloc", "std", "proc_macro", "test"];
+    if std_crates.contains(&first_part) {
+        return first_part.to_string();
+    }
+
+    // If it's a known crate pattern, return it
+    if !first_part.is_empty() 
+        && !first_part.starts_with('<')
+        && !first_part.starts_with('_')
+        && !first_part.chars().all(|c| c.is_numeric())
+        && first_part.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return first_part.to_string();
+    }
+
+    // For complex functions, try to find a crate name in the path
+    for part in parts {
+        if !part.is_empty()
+            && !part.starts_with('<')
+            && !part.starts_with('_')
+            && !part.chars().all(|c| c.is_numeric())
+            && part.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            // Check if this looks like a crate name (not a type or function)
+            if !part.chars().next().map_or(false, |c| c.is_uppercase()) {
+                return part.to_string();
+            }
+        }
+    }
+
+    // Default to unknown
+    "unknown".to_string()
+}

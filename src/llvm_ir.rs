@@ -1,16 +1,26 @@
 use binfarce::demangle::SymbolName;
 use std::collections::HashMap;
+use crate::types::{LlvmIrLines, NumberOfCopies};
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct LlvmInstantiations {
-    pub copies: usize,
-    pub total_lines: usize,
+    pub copies: NumberOfCopies,
+    pub total_lines: LlvmIrLines,
+}
+
+impl Default for LlvmInstantiations {
+    fn default() -> Self {
+        Self {
+            copies: NumberOfCopies::new(0usize),
+            total_lines: LlvmIrLines::new(0usize),
+        }
+    }
 }
 
 impl LlvmInstantiations {
     fn record_lines(&mut self, lines: usize) {
-        self.copies += 1;
-        self.total_lines += lines;
+        self.copies = NumberOfCopies::new(self.copies.value() + 1);
+        self.total_lines = LlvmIrLines::new(self.total_lines.value() + lines);
     }
 }
 

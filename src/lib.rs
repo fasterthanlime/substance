@@ -17,8 +17,14 @@ use facet::Facet;
 use log::{debug, error, info, warn};
 use multimap::MultiMap;
 
+use crate::types::{CrateName, DemangledSymbol, LlvmFilePath, LlvmIrLines, NumberOfCopies, ByteSize, UNDEMANGLED_CRATE};
+
 pub mod crate_name;
 pub mod llvm_ir;
+pub mod formatting;
+pub mod reporting;
+pub mod analysis_ext;
+pub mod types;
 
 // Cargo JSON metadata structures
 #[derive(Debug, Facet)]
@@ -90,7 +96,7 @@ impl TimingInfo {
 #[derive(Debug)]
 pub struct BloatAnalyzer;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BuildContext {
     pub target_triple: String,
     pub artifacts: Vec<Artifact>,
@@ -99,7 +105,7 @@ pub struct BuildContext {
     pub deps_symbols: MultiMap<String, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Artifact {
     pub kind: ArtifactKind,
     pub name: String,
@@ -127,6 +133,8 @@ pub struct AnalysisConfig {
     pub analyze_llvm_ir: bool,
     /// Optional target directory to search for .ll files (defaults to "target")
     pub target_dir: Option<std::path::PathBuf>,
+    /// Build type to determine where to look for LLVM IR files
+    pub build_type: Option<BuildType>,
 }
 
 /// A symbol with its associated crate name
@@ -136,8 +144,8 @@ pub struct Symbol {
 }
 
 pub struct AnalysisResult {
-    pub file_size: u64,
-    pub text_size: u64,
+    pub file_size: ByteSize,
+    pub text_size: ByteSize,
     pub symbols: Vec<SymbolData>,
     pub enriched_symbols: Option<Vec<Symbol>>,
     pub section_name: Option<String>,
@@ -147,14 +155,50 @@ pub struct AnalysisResult {
 
 #[derive(Debug, Clone)]
 pub struct LlvmIrAnalysis {
-    /// Function instantiation data keyed by demangled function name
-    pub instantiations: std::collections::HashMap<String, crate::llvm_ir::LlvmInstantiations>,
+    /// Two-level map: crate_name -> (demangled_symbol -> stats)
+    pub crates: std::collections::HashMap<CrateName, std::collections::HashMap<DemangledSymbol, crate::llvm_ir::LlvmInstantiations>>,
     /// Total LLVM IR lines across all functions
-    pub total_lines: usize,
+    pub total_lines: LlvmIrLines,
     /// Total number of function instantiations
-    pub total_copies: usize,
+    pub total_copies: NumberOfCopies,
     /// Paths to .ll files that were analyzed
-    pub analyzed_files: Vec<std::path::PathBuf>,
+    pub analyzed_files: Vec<LlvmFilePath>,
+}
+
+impl LlvmIrAnalysis {
+    /// Get top N functions by LLVM IR lines across all crates
+    pub fn top_functions(&self, n: usize) -> Vec<(CrateName, DemangledSymbol, &crate::llvm_ir::LlvmInstantiations)> {
+        let mut all_functions = Vec::new();
+        
+        for (crate_name, functions) in &self.crates {
+            for (symbol_name, stats) in functions {
+                all_functions.push((crate_name.clone(), symbol_name.clone(), stats));
+            }
+        }
+        
+        all_functions.sort_by_key(|(_, _, stats)| std::cmp::Reverse(stats.total_lines.value()));
+        all_functions.truncate(n);
+        all_functions
+    }
+    
+    /// Get LLVM IR lines per crate, sorted by size
+    pub fn lines_per_crate(&self) -> Vec<(CrateName, LlvmIrLines)> {
+        let mut crate_sizes: std::collections::HashMap<CrateName, usize> = std::collections::HashMap::new();
+        
+        for (crate_name, functions) in &self.crates {
+            let total_lines: usize = functions.values()
+                .map(|stats| stats.total_lines.value())
+                .sum();
+            crate_sizes.insert(crate_name.clone(), total_lines);
+        }
+        
+        let mut crate_list: Vec<(CrateName, LlvmIrLines)> = crate_sizes
+            .into_iter()
+            .map(|(name, lines)| (name, LlvmIrLines::new(lines)))
+            .collect();
+        crate_list.sort_by_key(|(_, lines)| std::cmp::Reverse(lines.value()));
+        crate_list
+    }
 }
 
 #[derive(Debug)]
@@ -201,19 +245,19 @@ pub struct BuildResult {
 }
 
 // Analysis comparison types
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnalysisComparison {
     pub file_size_diff: FileSizeDiff,
     pub symbol_changes: Vec<SymbolChange>,
     pub crate_changes: Vec<CrateChange>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileSizeDiff {
-    pub file_size_before: u64,
-    pub file_size_after: u64,
-    pub text_size_before: u64,
-    pub text_size_after: u64,
+    pub file_size_before: ByteSize,
+    pub file_size_after: ByteSize,
+    pub text_size_before: ByteSize,
+    pub text_size_after: ByteSize,
 }
 
 #[derive(Debug, Clone)]
@@ -467,18 +511,15 @@ impl BloatAnalyzer {
                 .target_dir
                 .as_deref()
                 .unwrap_or(path::Path::new("target"));
-            let crate_name = binary_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.split('-').next().unwrap_or(s));
 
-            match Self::analyze_llvm_ir_from_target_dir(target_dir, crate_name) {
+            match Self::analyze_llvm_ir_from_target_dir(target_dir, config.build_type) {
                 Ok(llvm_analysis) => {
                     result.llvm_ir_data = Some(llvm_analysis);
                 }
-                Err(_) => {
+                Err(e) => {
                     // Don't fail the entire analysis if LLVM IR is not available
                     // This allows graceful degradation
+                    warn!("LLVM IR analysis failed: {}", e);
                 }
             }
         }
@@ -496,9 +537,9 @@ impl BloatAnalyzer {
     /// Analyze LLVM IR files in the target directory
     pub fn analyze_llvm_ir_from_target_dir(
         target_dir: &path::Path,
-        crate_name: Option<&str>,
+        build_type: Option<BuildType>,
     ) -> Result<LlvmIrAnalysis, BloatError> {
-        let ll_files = find_llvm_ir_files(target_dir, crate_name)?;
+        let ll_files = find_llvm_ir_files(target_dir, build_type)?;
 
         if ll_files.is_empty() {
             return Err(BloatError::CargoError(
@@ -507,9 +548,9 @@ impl BloatAnalyzer {
             ));
         }
 
-        let mut combined_instantiations = std::collections::HashMap::new();
-        let mut total_lines = 0;
-        let mut total_copies = 0;
+        let mut crates_map = std::collections::HashMap::new();
+        let mut total_lines = 0usize;
+        let mut total_copies = 0usize;
 
         for ll_file in &ll_files {
             let data =
@@ -517,21 +558,51 @@ impl BloatAnalyzer {
             let instantiations = crate::llvm_ir::analyze_llvm_ir_data(&data);
 
             for (func_name, stats) in instantiations {
-                let entry = combined_instantiations
-                    .entry(func_name)
+                // Try to extract crate name from the function name
+                let mut crate_name_str = crate::crate_name::extract_crate_from_function(&func_name);
+                
+                // If we got "unknown", try to extract from the .ll filename
+                if crate_name_str == "unknown" {
+                    if let Some(file_stem) = ll_file.file_stem().and_then(|s| s.to_str()) {
+                        // Parse crate name from filename like "serde-abc123"
+                        if let Some((crate_part, _hash)) = file_stem.rsplit_once('-') {
+                            crate_name_str = crate_part.to_string();
+                        } else {
+                            crate_name_str = UNDEMANGLED_CRATE.to_string();
+                        }
+                    } else {
+                        crate_name_str = UNDEMANGLED_CRATE.to_string();
+                    }
+                }
+                
+                let crate_name = CrateName::from(crate_name_str);
+                let demangled_symbol = DemangledSymbol::from(func_name);
+                
+                // Get or create the map for this crate
+                let crate_functions = crates_map
+                    .entry(crate_name)
+                    .or_insert_with(std::collections::HashMap::new);
+                
+                // Add or update the stats for this function
+                let entry = crate_functions
+                    .entry(demangled_symbol)
                     .or_insert_with(crate::llvm_ir::LlvmInstantiations::default);
-                entry.copies += stats.copies;
-                entry.total_lines += stats.total_lines;
-                total_lines += stats.total_lines;
-                total_copies += stats.copies;
+                entry.copies = NumberOfCopies::new(entry.copies.value() + stats.copies.value());
+                entry.total_lines = LlvmIrLines::new(entry.total_lines.value() + stats.total_lines.value());
+                total_lines += stats.total_lines.value();
+                total_copies += stats.copies.value();
             }
         }
 
+        let analyzed_files = ll_files.into_iter()
+            .map(|p| LlvmFilePath::from(p.to_string_lossy().to_string()))
+            .collect();
+
         Ok(LlvmIrAnalysis {
-            instantiations: combined_instantiations,
-            total_lines,
-            total_copies,
-            analyzed_files: ll_files,
+            crates: crates_map,
+            total_lines: LlvmIrLines::new(total_lines),
+            total_copies: NumberOfCopies::new(total_copies),
+            analyzed_files,
         })
     }
 
@@ -621,11 +692,17 @@ impl BuildRunner {
         cmd.arg(&self.target_dir);
 
         // Set environment variables for LLVM IR and timing
-        cmd.env("RUSTFLAGS", "--emit=llvm-ir");
+        let rustflags = "--emit=llvm-ir";
+        cmd.env("RUSTFLAGS", rustflags);
         cmd.env("RUSTC_BOOTSTRAP", "1");
+
+        // Log the environment variables
+        info!("Setting RUSTFLAGS={}", rustflags);
+        info!("Setting RUSTC_BOOTSTRAP=1 for timing information");
 
         // Log the full command
         info!("Executing cargo command: {:?}", cmd);
+        info!("Command environment: RUSTFLAGS='{}' RUSTC_BOOTSTRAP='1'", rustflags);
 
         // Execute the build
         let output = cmd
@@ -645,6 +722,34 @@ impl BuildRunner {
         }
 
         info!("Cargo build completed successfully");
+
+        // Check if LLVM IR files were generated
+        let build_dir = match self.build_type {
+            BuildType::Release => "release",
+            BuildType::Debug => "debug",
+        };
+        let ll_check_dir = self.target_dir.join(build_dir).join("deps");
+        if ll_check_dir.exists() {
+            let ll_count = fs::read_dir(&ll_check_dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.path()
+                                .extension()
+                                .map(|ext| ext == "ll")
+                                .unwrap_or(false)
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            
+            if ll_count > 0 {
+                info!("Found {} LLVM IR files in {}", ll_count, ll_check_dir.display());
+            } else {
+                warn!("No LLVM IR files found in {}. RUSTFLAGS may not have been applied correctly.", ll_check_dir.display());
+            }
+        }
 
         // Parse the JSON output
         let stdout = str::from_utf8(&output.stdout).map_err(|_| BloatError::InvalidCargoOutput)?;
@@ -986,7 +1091,7 @@ fn collect_self_data(path: &path::Path, section_name: &str) -> Result<AnalysisRe
     d.symbols.sort_by_key(|v| v.address);
     d.symbols.dedup_by_key(|v| v.address);
 
-    d.file_size = fs::metadata(path).unwrap().len();
+    d.file_size = ByteSize::new(fs::metadata(path).unwrap().len());
 
     Ok(d)
 }
@@ -1016,8 +1121,8 @@ fn collect_elf_data(
 
     let d = AnalysisResult {
         symbols,
-        file_size: 0,
-        text_size,
+        file_size: ByteSize::new(0u64),
+        text_size: ByteSize::new(text_size),
         enriched_symbols: None,
         section_name: Some(section_name.to_owned()),
         llvm_ir_data: None,
@@ -1030,8 +1135,8 @@ fn collect_macho_data(data: &[u8]) -> Result<AnalysisResult, BloatError> {
     let (symbols, text_size) = macho::parse(data)?.symbols()?;
     let d = AnalysisResult {
         symbols,
-        file_size: 0,
-        text_size,
+        file_size: ByteSize::new(0u64),
+        text_size: ByteSize::new(text_size),
         enriched_symbols: None,
         section_name: None,
         llvm_ir_data: None,
@@ -1062,8 +1167,8 @@ fn collect_pe_data(path: &path::Path, data: &[u8]) -> Result<AnalysisResult, Blo
     } else {
         Ok(AnalysisResult {
             symbols,
-            file_size: 0,
-            text_size,
+            file_size: ByteSize::new(0u64),
+            text_size: ByteSize::new(text_size),
             enriched_symbols: None,
             section_name: None,
             llvm_ir_data: None,
@@ -1193,8 +1298,8 @@ fn collect_pdb_data(pdb_path: &path::Path, text_size: u64) -> Result<AnalysisRes
 
     let d = AnalysisResult {
         symbols,
-        file_size: 0,
-        text_size,
+        file_size: ByteSize::new(0u64),
+        text_size: ByteSize::new(text_size),
         enriched_symbols: None,
         section_name: None,
         llvm_ir_data: None,
@@ -1306,30 +1411,47 @@ fn get_default_target() -> Result<String, BloatError> {
 /// Find LLVM IR (.ll) files in the target directory
 fn find_llvm_ir_files(
     target_dir: &path::Path,
-    crate_name: Option<&str>,
+    build_type: Option<BuildType>,
 ) -> Result<Vec<path::PathBuf>, BloatError> {
     let mut ll_files = Vec::new();
 
+    // Determine the build directory based on build type
+    let build_dir = match build_type {
+        Some(BuildType::Release) => "release",
+        Some(BuildType::Debug) | None => "debug",
+    };
+
+    info!("Searching for LLVM IR files in {} build directory", build_dir);
+
     // Search in multiple potential locations within target directory
     let search_dirs = vec![
-        target_dir.join("debug"),
-        target_dir.join("debug").join("deps"),
-        target_dir.join("debug").join("examples"),
-        target_dir.join("debug").join("incremental"),
+        target_dir.join(build_dir),
+        target_dir.join(build_dir).join("deps"),
+        target_dir.join(build_dir).join("examples"),
+        target_dir.join(build_dir).join("incremental"),
     ];
 
-    for search_dir in search_dirs {
+    for search_dir in &search_dirs {
         if search_dir.exists() {
-            find_ll_files_in_dir(&search_dir, crate_name, &mut ll_files)?;
+            debug!("Searching directory: {}", search_dir.display());
+            let initial_count = ll_files.len();
+            find_ll_files_in_dir(&search_dir, &mut ll_files)?;
+            let found_count = ll_files.len() - initial_count;
+            if found_count > 0 {
+                info!("Found {} .ll files in {}", found_count, search_dir.display());
+            }
+        } else {
+            debug!("Directory does not exist: {}", search_dir.display());
         }
     }
+
+    info!("Total LLVM IR files found: {}", ll_files.len());
 
     Ok(ll_files)
 }
 
 fn find_ll_files_in_dir(
     dir: &path::Path,
-    crate_name: Option<&str>,
     ll_files: &mut Vec<path::PathBuf>,
 ) -> Result<(), BloatError> {
     let entries = fs::read_dir(dir).map_err(|_| BloatError::OpenFailed(dir.to_owned()))?;
@@ -1339,21 +1461,19 @@ fn find_ll_files_in_dir(
 
         if path.is_dir() {
             // Recursively search subdirectories (like incremental compilation dirs)
-            find_ll_files_in_dir(&path, crate_name, ll_files)?;
+            find_ll_files_in_dir(&path, ll_files)?;
         } else if let Some(extension) = path.extension() {
             if extension == "ll" {
-                // If crate_name is specified, filter by it
-                if let Some(name) = crate_name {
-                    if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if file_stem.starts_with(name) || file_stem.contains(&format!("-{}", name))
-                        {
-                            ll_files.push(path);
-                        }
+                // Exclude build scripts
+                if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                    if file_name.starts_with("build_script_") || file_name.starts_with("build-script-") {
+                        debug!("Skipping build script .ll file: {}", path.display());
+                        continue;
                     }
-                } else {
-                    // Include all .ll files if no crate name specified
-                    ll_files.push(path);
                 }
+                // Include all non-build-script .ll files
+                debug!("Found .ll file: {}", path.display());
+                ll_files.push(path);
             }
         }
     }
