@@ -3,7 +3,6 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use ignore::WalkBuilder;
-use rayon::prelude::*;
 
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
@@ -16,9 +15,9 @@ use multimap::MultiMap;
 use crate::cargo::{CargoMessage, TimingInfo};
 use crate::env::{collect_rlib_paths, stdlibs_dir};
 use crate::errors::SubstanceError;
-use crate::llvm_ir::{analyze_llvm_ir_data, analyze_llvm_ir_from_target_dir};
+use crate::llvm_ir::analyze_llvm_ir_from_target_dir;
 use crate::object::{collect_deps_symbols, collect_self_data};
-use crate::types::{ByteSize, CrateName, LlvmFunction, LlvmFunctionName, MangledSymbol};
+use crate::types::{ByteSize, CrateName, MangledSymbol};
 
 pub mod cargo;
 pub mod crate_name;
