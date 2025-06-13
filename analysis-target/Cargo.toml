@@ -1,0 +1,15 @@
+[package]
+name = "analysis-target"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+facet = "0.27.12"
+facet-json = { version = "0.24.13", optional = true }
+facet-pretty = "0.23.19"
+facet-toml = { version = "0.25.13", optional = true }
+
+[features]
+default = []
+facet-json = ["dep:facet-json"]
+facet-toml = ["dep:facet-toml"]

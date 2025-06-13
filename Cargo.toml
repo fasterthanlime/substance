@@ -45,4 +45,5 @@ owo-colors = "4"
 [dev-dependencies]
 camino = "1.1"
 env_logger = "0.11.8"
+itertools = "0.14.0"
 owo-colors = "4"

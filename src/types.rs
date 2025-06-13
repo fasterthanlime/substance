@@ -1,12 +1,9 @@
 //! Strongly-typed strings and quantities for better type safety
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use aliri_braid::braid;
 use strong_type::StrongType;
-
-/// Special crate name for symbols that couldn't be demangled
-pub const UNDEMANGLED_CRATE: &str = "<undemangled>";
 
 // Strongly-typed quantities
 #[derive(StrongType)]
@@ -44,22 +41,6 @@ pub struct LlvmFunctionName;
 /// A file path for .ll files
 #[braid]
 pub struct LlvmFilePath;
-
-/// Complete analysis report for a single version
-pub struct BuildReport {
-    /// For how long `cargo build` ran
-    pub build_duration: Duration,
-
-    /// The resulting binary size
-    pub file_size: ByteSize,
-
-    /// The size of the .text section
-    pub text_size: ByteSize,
-
-    /// All crates with their sizes (for comparison)
-    /// HashMap<crate_name, size_bytes>
-    pub crates: Vec<Crate>,
-}
 
 /// Info about a given crate
 pub struct Crate {

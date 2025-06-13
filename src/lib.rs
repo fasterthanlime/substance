@@ -374,7 +374,7 @@ impl BuildRunner {
             text_size.value()
         );
 
-        let context = BuildContext {
+        let mut context = BuildContext {
             std_crates,
             dep_crates,
             deps_symbols,
@@ -443,13 +443,15 @@ impl BuildRunner {
 
         // Process LLVM functions and group by crate
         for (llvm_fn_name, llvm_fn) in llvm_functions {
-            // Extract crate name from the function path
-            let fn_str = llvm_fn_name.as_str();
-            let crate_name = if let Some(first_sep) = fn_str.find("::") {
-                CrateName::from(&fn_str[..first_sep])
-            } else {
-                // If no :: separator, assume it's from the main binary crate
-                binary_artifact.name.clone()
+            // Extract crate name from the function path using robust logic
+            let crate_name = {
+                let crate_string = crate_name::extract_crate_from_function(&llvm_fn_name);
+                if crate_string == "unknown" {
+                    // Fallback to binary artifact name as main crate
+                    binary_artifact.name.clone()
+                } else {
+                    CrateName::from(crate_string)
+                }
             };
 
             // Update the LlvmFunction with its proper name
@@ -466,8 +468,7 @@ impl BuildRunner {
                 .llvm_functions
                 .insert(llvm_fn_name, llvm_fn_with_name);
         }
-
-        // Set the proper crate names and convert to Vec
+        // Set the proper crate names, sort, and store in context
         let mut crates: Vec<Crate> = crates_map
             .into_iter()
             .map(|(name, mut crate_obj)| {
@@ -478,6 +479,8 @@ impl BuildRunner {
 
         // Sort crates by name for consistent output
         crates.sort_by(|a, b| a.name.cmp(&b.name));
+
+        context.crates = crates;
 
         Ok(context)
     }
