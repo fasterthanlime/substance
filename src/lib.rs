@@ -28,9 +28,6 @@ pub mod object;
 pub mod reporting;
 pub mod types;
 
-// Re-export important types
-pub use binfarce::demangle::SymbolData as BinarySymbol;
-
 pub struct BuildContext {
     /// Crate names of libraries found under the libstd `target-libdir`,
     /// something like: `$RUSTUP_HOME/toolchains/stable-$TRIPLE/lib/rustlib/$TRIPLE/lib`
