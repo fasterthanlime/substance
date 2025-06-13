@@ -122,15 +122,28 @@ impl BuildRunner {
     /// Create a new BuildRunner instance.
     pub fn for_manifest(manifest_path: impl Into<Utf8PathBuf>) -> Self {
         use std::env;
+
         // Check if SUBSTANCE_TMP_DIR is set
         if let Ok(dir) = env::var("SUBSTANCE_TMP_DIR") {
-            let target_dir = Utf8PathBuf::from(dir);
+            let manifest_path: Utf8PathBuf = manifest_path.into();
+
+            // Mix in the hash of the manifest_path to the target_dir for uniqueness
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut hasher = DefaultHasher::new();
+            manifest_path.hash(&mut hasher);
+            let hash_val = hasher.finish();
+
+            let base_target_dir = Utf8PathBuf::from(dir);
+            let target_dir = base_target_dir.join(format!("{:016x}", hash_val));
+
             info!(
-                "Using SUBSTANCE_TMP_DIR as target directory: {}",
+                "Using SUBSTANCE_TMP_DIR as target directory: {} (mixed with manifest hash)",
                 target_dir
             );
             Self {
-                manifest_path: manifest_path.into(),
+                manifest_path,
                 target_dir,
                 _temp_dir: None,
                 additional_args: Vec::new(),
