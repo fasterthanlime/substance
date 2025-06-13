@@ -1,7 +1,7 @@
 use camino::Utf8PathBuf;
 use itertools::Itertools;
 use owo_colors::OwoColorize;
-use substance::NumberOfCopies;
+use substance::{CrateName, NumberOfCopies};
 
 fn main() -> Result<(), eyre::Error> {
     env_logger::init();
@@ -41,7 +41,9 @@ fn main() -> Result<(), eyre::Error> {
         manifest_path
     );
 
-    let context = substance::BuildRunner::for_manifest(&manifest_path).run()?;
+    let context = substance::BuildRunner::for_manifest(&manifest_path)
+        .arg("--all-features")
+        .run()?;
 
     // Display the report
     println!("\n{}", "📊 BUILD REPORT".blue().bold());
@@ -100,6 +102,107 @@ fn main() -> Result<(), eyre::Error> {
             krate.name.cyan().bold(),
             krate.symbols.len().blue(),
             "symbols".bright_black()
+        );
+    }
+
+    let std_crates: Vec<CrateName> = context.std_crates.iter().cloned().collect();
+
+    println!();
+    println!("{}", "⏰ Top 20 crates by build time".purple().bold());
+
+    // Use the actual build timing information collected from Cargo's JSON output
+    // (`TimingInfo::duration` is in seconds).
+    let crate_times = context
+        .crates
+        .iter()
+        .filter_map(|krate| krate.timing_info.as_ref().map(|ti| (krate, ti.duration)))
+        .sorted_by(|a, b| {
+            // Sort descending by duration
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .take(20)
+        .collect::<Vec<_>>();
+
+    for (i, (krate, seconds)) in crate_times.into_iter().enumerate() {
+        println!(
+            "{}. {} - {}",
+            (i + 1).yellow(),
+            krate.name.cyan().bold(),
+            format!("{:.2}s", seconds).bright_blue(),
+        );
+    }
+
+    println!();
+    println!("{}", "🏋️  Top 20 largest symbols by size".purple().bold());
+
+    // Gather every symbol from every non-stdlib crate with its size
+    let mut all_symbols = Vec::new();
+    for krate in &context.crates {
+        if std_crates.contains(&krate.name) {
+            continue; // Skip standard library crates
+        }
+        for sym in krate.symbols.values() {
+            all_symbols.push((&krate.name, &sym.name, sym.size));
+        }
+    }
+
+    for (i, (crate_name, symbol_name, size)) in all_symbols
+        .into_iter()
+        .sorted_by_key(|(_, _, s)| -(s.value() as i64))
+        .take(20)
+        .enumerate()
+    {
+        println!(
+            "{}. {} ({}) - {}",
+            (i + 1).yellow(),
+            symbol_name.blue(),
+            crate_name.cyan().bold(),
+            format_bytes(size.value()).bright_green()
+        );
+    }
+
+    println!();
+    println!(
+        "{}",
+        "🦀 Top 20 largest LLVM functions by total lines"
+            .purple()
+            .bold()
+    );
+
+    // Collect every LLVM function from every non-stdlib crate with its line count
+    let mut all_functions = Vec::new();
+    for krate in &context.crates {
+        if std_crates.contains(&krate.name) {
+            continue; // Skip standard library crates
+        }
+        for func in krate.llvm_functions.values() {
+            all_functions.push((&krate.name, &func.name, func.lines, func.copies));
+        }
+    }
+
+    for (i, (crate_name, func_name, lines, copies)) in all_functions
+        .into_iter()
+        .sorted_by_key(|(_, _, l, _)| -(l.value() as isize))
+        .take(20)
+        .enumerate()
+    {
+        let copies_info = if copies.value() > 1 {
+            format!(
+                " ({} {})",
+                copies.value().bright_magenta(),
+                "copies".bright_magenta()
+            )
+        } else {
+            String::new()
+        };
+
+        println!(
+            "{}. {} ({}) - {} lines{}",
+            (i + 1).yellow(),
+            func_name.blue(),
+            crate_name.cyan().bold(),
+            lines.value().bright_blue(),
+            copies_info
         );
     }
 

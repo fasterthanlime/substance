@@ -436,6 +436,7 @@ impl BuildRunner {
                     name: CrateName::from(""),
                     symbols: HashMap::new(),
                     llvm_functions: HashMap::new(),
+                    timing_info: None,
                 })
                 .symbols
                 .insert(demangled_symbol, symbol_obj);
@@ -464,15 +465,31 @@ impl BuildRunner {
                     name: CrateName::from(""),
                     symbols: HashMap::new(),
                     llvm_functions: HashMap::new(),
+                    timing_info: None,
                 })
                 .llvm_functions
                 .insert(llvm_fn_name, llvm_fn_with_name);
         }
-        // Set the proper crate names, sort, and store in context
+        // Set the proper crate names, populate timing information, and collect into a Vec
         let mut crates: Vec<Crate> = crates_map
             .into_iter()
             .map(|(name, mut crate_obj)| {
-                crate_obj.name = name;
+                // Assign the crate name
+                crate_obj.name = name.clone();
+
+                // If we have recorded build timing for this crate, attach it
+                if let Some(dur) = crate_build_times.get(&name) {
+                    crate_obj.timing_info = Some(TimingInfo {
+                        target: crate::cargo::CargoTarget {
+                            name: Some(name.as_str().to_string()),
+                            kind: None,
+                            crate_types: None,
+                        },
+                        duration: dur.as_secs_f64(),
+                        rmeta_time: None,
+                    });
+                }
+
                 crate_obj
             })
             .collect();

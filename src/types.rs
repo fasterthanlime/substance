@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use aliri_braid::braid;
 use strong_type::StrongType;
 
+use crate::cargo::TimingInfo;
+
 // Strongly-typed quantities
 #[derive(StrongType)]
 #[strong_type(auto_operators)]
@@ -46,6 +48,9 @@ pub struct LlvmFilePath;
 pub struct Crate {
     /// Something like `std`, `ks_facet`, etc.
     pub name: CrateName,
+
+    /// Timing info
+    pub timing_info: Option<TimingInfo>,
 
     /// Symbols found in the binary
     pub symbols: HashMap<DemangledSymbol, Symbol>,
