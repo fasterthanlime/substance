@@ -120,6 +120,21 @@ pub struct AggregateSymbol {
     pub crates: HashSet<CrateName>,
 }
 
+/// LLVM function, aggregated per crate
+#[derive(Clone)]
+pub struct AggregateLlvmFunction {
+    pub name: LlvmFunctionName,
+
+    /// Total number of LLVM IR lines across all crates
+    pub total_llvm_lines: LlvmIrLines,
+
+    /// Number of copies we found
+    pub copies: NumberOfCopies,
+
+    /// All the crates this function was found in.
+    pub crates: HashSet<CrateName>,
+}
+
 impl BuildContext {
     /// Returns the total number of LLVM IR lines across all crates in the build context.
     pub fn num_llvm_lines(&self) -> usize {
@@ -131,11 +146,6 @@ impl BuildContext {
         let mut symbol_map: HashMap<DemangledSymbolWithoutHash, AggregateSymbol> = HashMap::new();
 
         for krate in &self.crates {
-            // Skip standard-library crates
-            if self.std_crates.contains(&krate.name) {
-                continue;
-            }
-
             for sym in krate.symbols.values() {
                 let hashless = sym.name.strip_hash();
 
@@ -165,6 +175,41 @@ impl BuildContext {
         }
 
         symbol_map
+    }
+
+    /// Returns a map from LLVM function name (LlvmFunctionName) to its aggregate information,
+    /// combining across all crates in the build context, keyed by function name.
+    pub fn all_llvm_functions(&self) -> HashMap<LlvmFunctionName, AggregateLlvmFunction> {
+        let mut llvm_map: HashMap<LlvmFunctionName, AggregateLlvmFunction> = HashMap::new();
+
+        for krate in &self.crates {
+            for func in krate.llvm_functions.values() {
+                let fname = func.name.clone();
+
+                llvm_map
+                    .entry(fname.clone())
+                    .and_modify(|agg| {
+                        // Accumulate LLVM IR line count
+                        agg.total_llvm_lines = agg.total_llvm_lines + func.lines;
+                        // Count another copy
+                        agg.copies = agg.copies + func.copies;
+                        // Track which crate
+                        agg.crates.insert(krate.name.clone());
+                    })
+                    .or_insert_with(|| {
+                        let mut crates_set: HashSet<CrateName> = HashSet::new();
+                        crates_set.insert(krate.name.clone());
+                        AggregateLlvmFunction {
+                            name: fname.clone(),
+                            total_llvm_lines: func.lines,
+                            copies: func.copies,
+                            crates: crates_set,
+                        }
+                    });
+            }
+        }
+
+        llvm_map
     }
 }
 
