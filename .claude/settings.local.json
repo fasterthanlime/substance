@@ -11,7 +11,9 @@
       "WebFetch(domain:github.com)",
       "Bash(RUSTC_BOOTSTRAP=1 cargo build --timings=json --message-format=json 2 > /dev/null)",
       "Bash(cargo clean:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "mcp__gemini__chat",
+      "mcp__gemini__codereview"
     ],
     "deny": []
   }

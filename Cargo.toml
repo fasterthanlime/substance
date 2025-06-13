@@ -1,6 +1,6 @@
 [package]
 name = "substance"
-version = "0.4.0"
+version = "0.5.0"
 description = "Analyze the size composition of binaries by examining symbols and mapping them to crates."
 categories = ["development-tools", "parsing"]
 repository = "https://github.com/fasterthanlime/substance"
@@ -12,21 +12,15 @@ edition = "2018"
 name = "substance"
 path = "src/lib.rs"
 
-[[example]]
-name = "analyze_binary"
-path = "examples/analyze_binary.rs"
-
-[[example]]
-name = "simple_analysis"
-path = "examples/simple_analysis.rs"
-
-[[example]]
-name = "compare_builds"
-path = "examples/compare_builds.rs"
-
 [profile.release]
 strip = "debuginfo"
 lto = "thin"
+
+[features]
+default = ["formatting"]
+formatting = []
+markdown = []
+cli = [ "indicatif"]
 
 [dependencies]
 # Core library dependencies
@@ -37,7 +31,19 @@ multimap = { version = "0.10", default-features = false }
 binfarce = "0.2.1"
 pdb = "0.8.0"
 log = "0.4"
-compact_str = "0.8"
+aliri_braid = "0.4"
+strong-type = "0.7"
+indicatif = { version = "0.17", optional = true }
+rayon = "1.10.0"
+camino = "1.1"
+thiserror = "2.0.12"
+eyre = "0.6.12"
+ignore = "0.4.23"
+tempfile = "3.20.0"
+owo-colors = "4"
 
 [dev-dependencies]
 camino = "1.1"
+env_logger = "0.11.8"
+itertools = "0.14.0"
+owo-colors = "4"

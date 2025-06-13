@@ -1,21 +1,64 @@
+use crate::{
+    errors::SubstanceError,
+    find_llvm_ir_files,
+    types::{LlvmFunction, LlvmFunctionName, LlvmIrLines, NumberOfCopies},
+};
 use binfarce::demangle::SymbolName;
+use camino::Utf8Path;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashMap;
 
-#[derive(Default, Debug, Clone)]
-pub struct LlvmInstantiations {
-    pub copies: usize,
-    pub total_lines: usize,
-}
-
-impl LlvmInstantiations {
+impl LlvmFunction {
     fn record_lines(&mut self, lines: usize) {
-        self.copies += 1;
-        self.total_lines += lines;
+        self.copies = NumberOfCopies::new(self.copies.value() + 1);
+        self.lines = LlvmIrLines::new(self.lines.value() + lines);
     }
 }
 
-pub fn analyze_llvm_ir_data(ir: &[u8]) -> HashMap<String, LlvmInstantiations> {
-    let mut instantiations: HashMap<String, LlvmInstantiations> = HashMap::new();
+/// Analyze LLVM IR files in the target directory
+pub fn analyze_llvm_ir_from_target_dir(
+    target_dir: &Utf8Path,
+) -> Result<HashMap<LlvmFunctionName, LlvmFunction>, SubstanceError> {
+    let ll_files = find_llvm_ir_files(target_dir)?;
+
+    if ll_files.is_empty() {
+        return Err(SubstanceError::CargoError(
+            "No LLVM IR files found. Make sure to build with RUSTFLAGS='--emit=llvm-ir'"
+                .to_string(),
+        ));
+    }
+
+    let results: Vec<Result<HashMap<_, _>, SubstanceError>> = ll_files
+        .par_iter()
+        .map(|ll_file| {
+            let data = std::fs::read(ll_file)
+                .map_err(|_| SubstanceError::OpenFailed(ll_file.clone().into()))?;
+            Ok(analyze_llvm_ir_data(&data))
+        })
+        .collect();
+
+    let mut functions: HashMap<LlvmFunctionName, LlvmFunction> = HashMap::new();
+    for file_result in results {
+        let file_functions = file_result?;
+
+        // If the same symbol occurs in multiple .ll files, sum up the lines and copies.
+        for (key, value) in file_functions {
+            functions
+                .entry(key)
+                .and_modify(|existing| {
+                    existing.copies =
+                        NumberOfCopies::new(existing.copies.value() + value.copies.value());
+                    existing.lines = LlvmIrLines::new(existing.lines.value() + value.lines.value());
+                })
+                .or_insert(value);
+        }
+    }
+
+    Ok(functions)
+}
+
+pub fn analyze_llvm_ir_data(ir: &[u8]) -> HashMap<LlvmFunctionName, LlvmFunction> {
+    let mut instantiations: HashMap<LlvmFunctionName, LlvmFunction> = HashMap::new();
     let mut current_function = None;
     let mut count = 0;
 
@@ -24,7 +67,14 @@ pub fn analyze_llvm_ir_data(ir: &[u8]) -> HashMap<String, LlvmInstantiations> {
             current_function = parse_function_name(line);
         } else if line == "}" {
             if let Some(name) = current_function.take() {
-                instantiations.entry(name).or_default().record_lines(count);
+                instantiations
+                    .entry(name)
+                    .and_modify(|func| func.record_lines(count))
+                    .or_insert_with(|| LlvmFunction {
+                        name: LlvmFunctionName::from("".to_string()),
+                        lines: LlvmIrLines::new(count),
+                        copies: NumberOfCopies::new(1_usize),
+                    });
             }
             count = 0;
         } else if line.starts_with("  ") && !line.starts_with("   ") {
@@ -35,7 +85,7 @@ pub fn analyze_llvm_ir_data(ir: &[u8]) -> HashMap<String, LlvmInstantiations> {
     instantiations
 }
 
-fn parse_function_name(line: &str) -> Option<String> {
+fn parse_function_name(line: &str) -> Option<LlvmFunctionName> {
     let start = line.find('@')? + 1;
     let end = line[start..].find('(')?;
     let mangled = line[start..start + end].trim_matches('"');
@@ -50,7 +100,7 @@ fn parse_function_name(line: &str) -> Option<String> {
         name.truncate(len);
     }
 
-    Some(name)
+    Some(LlvmFunctionName::from(name))
 }
 
 fn has_hash(name: &str) -> bool {
@@ -105,9 +155,12 @@ mod tests {
             println!("Got: {}", demangled);
             println!("Expected: {}", expected_demangled);
             assert_eq!(
-                demangled, expected_demangled,
+                demangled.as_str(),
+                expected_demangled,
                 "Demangling mismatch for {}\nExpected: {}\nGot: {}",
-                llvm_line, expected_demangled, demangled
+                llvm_line,
+                expected_demangled,
+                demangled
             );
         }
     }
@@ -146,7 +199,7 @@ start:
         for (name, stats) in &result {
             println!(
                 "Function: {}, copies: {}, lines: {}",
-                name, stats.copies, stats.total_lines
+                name, stats.copies, stats.lines
             );
         }
 
@@ -157,13 +210,13 @@ start:
         let drop_fn = result
             .get("core::ptr::drop_in_place<substance::BloatError>")
             .unwrap();
-        assert_eq!(drop_fn.copies, 1);
-        assert_eq!(drop_fn.total_lines, 4); // %a, %b, call, ret
+        assert_eq!(drop_fn.copies.value(), 1);
+        assert_eq!(drop_fn.lines.value(), 4); // %a, %b, call, ret
 
         // Check second function (appears twice, should be merged)
         let debug_fn = result.get("<&T as core::fmt::Debug>::fmt").unwrap();
-        assert_eq!(debug_fn.copies, 2); // Two instantiations
-        assert_eq!(debug_fn.total_lines, 6); // 4 lines first + 2 lines second
+        assert_eq!(debug_fn.copies.value(), 2); // Two instantiations
+        assert_eq!(debug_fn.lines.value(), 6); // 4 lines first + 2 lines second
     }
 
     #[test]
