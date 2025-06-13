@@ -6,20 +6,34 @@ use binfarce::demangle::{self, SymbolName};
 
 pub const UNKNOWN: &str = "[Unknown]";
 
-pub fn from_sym(d: &BuildContext, split_std: bool, sym: &SymbolName) -> (CrateName, bool) {
-    let (mut name, is_exact) = from_sym_impl(d, sym);
+pub enum StdHandling {
+    // Show core, addr2line, etc. separately
+    Split,
+    // Show "std" for all crates in libstd
+    Merged,
+}
 
-    if !split_std {
-        if d.std_crates.contains(&name) {
-            name = CrateName::from("std");
+pub fn from_sym(
+    context: &BuildContext,
+    std_handling: StdHandling,
+    sym: &SymbolName,
+) -> (CrateName, bool) {
+    let (mut name, is_exact) = from_sym_impl(context, sym);
+
+    match std_handling {
+        StdHandling::Merged => {
+            if context.std_crates.contains(&name) {
+                name = CrateName::from("std");
+            }
         }
+        StdHandling::Split => {}
     }
 
     (name, is_exact)
 }
 
-fn from_sym_impl(d: &BuildContext, sym: &SymbolName) -> (CrateName, bool) {
-    if let Some(name) = d
+fn from_sym_impl(context: &BuildContext, sym: &SymbolName) -> (CrateName, bool) {
+    if let Some(name) = context
         .deps_symbols
         .get(MangledSymbolRef::from_str(&sym.complete))
     {
@@ -28,13 +42,13 @@ fn from_sym_impl(d: &BuildContext, sym: &SymbolName) -> (CrateName, bool) {
 
     match sym.kind {
         demangle::Kind::Legacy => {
-            let (name, is_exact) = parse_sym(d, &sym.complete);
+            let (name, is_exact) = parse_sym(context, &sym.complete);
             (CrateName::from(name), is_exact)
         }
         demangle::Kind::V0 => match sym.crate_name {
             Some(ref name) => (CrateName::from(name.to_string()), true),
             None => {
-                let (name, is_exact) = parse_sym_v0(d, &sym.trimmed);
+                let (name, is_exact) = parse_sym_v0(context, &sym.trimmed);
                 (CrateName::from(name), is_exact)
             }
         },

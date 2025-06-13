@@ -8,10 +8,11 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use binfarce::ar;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use multimap::MultiMap;
 
 use crate::cargo::{CargoMessage, TimingInfo};
+use crate::crate_name::StdHandling;
 use crate::env::{collect_rlib_paths, stdlibs_dir};
 use crate::errors::SubstanceError;
 use crate::llvm_ir::analyze_llvm_ir_from_target_dir;
@@ -31,9 +32,6 @@ pub mod types;
 pub use binfarce::demangle::SymbolData as BinarySymbol;
 
 pub struct BuildContext {
-    /// All artifacts produced by the `cargo build` invokation
-    pub artifacts: Vec<Artifact>,
-
     /// Crate names of libraries found under the libstd `target-libdir`,
     /// something like: `$RUSTUP_HOME/toolchains/stable-$TRIPLE/lib/rustlib/$TRIPLE/lib`
     pub std_crates: Vec<CrateName>,
@@ -43,9 +41,6 @@ pub struct BuildContext {
 
     /// Maps mangled symbols to the crate names they belong to
     pub deps_symbols: MultiMap<MangledSymbol, CrateName>,
-
-    /// Per-crate timing information, if collected during build
-    pub timing_data: Vec<TimingInfo>,
 
     /// Optional global timing information (e.g. total build time)
     pub wall_duration: Duration,
@@ -261,9 +256,11 @@ impl BuildRunner {
                                 name: artifact.crate_name.clone(),
                                 path: filename.clone(),
                             };
-                            debug!(
+                            trace!(
                                 "Found artifact: {:?} - {} at {}",
-                                artifact_struct.kind, artifact_struct.name, filename
+                                artifact_struct.kind,
+                                artifact_struct.name,
+                                filename
                             );
                             artifacts.push(artifact_struct);
                         }
@@ -344,14 +341,16 @@ impl BuildRunner {
         let deps_symbols = collect_deps_symbols(rlib_paths)?;
         debug!("Collected symbols for {} dependencies.", deps_symbols.len());
 
-        // Find the binary artifact first
-        info!("Locating binary artifact for analysis...");
+        // Find the binary artifact first, filtering out build scripts
+        info!("Locating binary artifact for analysis (excluding build-script-build)...");
         let binary_artifact = stdout_result
             .artifacts
-            .iter()
-            .find(|a| matches!(a.kind, ArtifactKind::Binary))
+            .into_iter()
+            .find(|a| {
+                matches!(a.kind, ArtifactKind::Binary) && a.name.as_str() != "build-script-build"
+            })
             .ok_or(SubstanceError::CargoError(
-                "No binary artifact found.".to_string(),
+                "No binary artifact found (all were build-script-build or missing).".to_string(),
             ))?;
         info!(
             "Binary artifact found: {} (path: {})",
@@ -362,12 +361,8 @@ impl BuildRunner {
         let file_metadata = std::fs::metadata(&binary_artifact.path)
             .map_err(|_| SubstanceError::OpenFailed(binary_artifact.path.clone()))?;
         let file_size = ByteSize::new(file_metadata.len());
-        info!(
-            "Binary file size: {} bytes",
-            file_size.value()
-        );
+        info!("Binary file size: {} bytes", file_size.value());
 
-        // TODO: Implement artifact analysis at this point.
         info!(
             "Collecting self data (.text section) from binary artifact: {}",
             binary_artifact.path
@@ -378,6 +373,16 @@ impl BuildRunner {
             "Collected self data for binary artifact (.text section size: {} bytes).",
             text_size.value()
         );
+
+        let context = BuildContext {
+            std_crates,
+            dep_crates,
+            deps_symbols,
+            wall_duration,
+            file_size,
+            text_size,
+            crates: Default::default(),
+        };
 
         // Analyze LLVM IR (if any) for this crate from the target dir
         info!(
@@ -417,13 +422,8 @@ impl BuildRunner {
 
         // Process binary symbols and group by crate
         for symbol in raw_data.symbols {
-            let crate_name = symbol
-                .name
-                .crate_name
-                .as_ref()
-                .map(|s| CrateName::from(s.as_str()))
-                .unwrap_or_else(|| CrateName::from(UNDEMANGLED_CRATE));
-
+            let (crate_name, _exact) =
+                crate_name::from_sym(&context, StdHandling::Merged, &symbol.name);
             let demangled_symbol = DemangledSymbol::from(symbol.name.complete);
             let symbol_obj = Symbol {
                 name: demangled_symbol.clone(),
@@ -479,17 +479,6 @@ impl BuildRunner {
         // Sort crates by name for consistent output
         crates.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let context = BuildContext {
-            artifacts: stdout_result.artifacts,
-            std_crates,
-            dep_crates,
-            deps_symbols,
-            timing_data: stdout_result.timing_infos,
-            wall_duration,
-            file_size,
-            text_size,
-            crates,
-        };
         Ok(context)
     }
 
