@@ -16,4 +16,4 @@ jobs:
       run: cargo +1.87.0 build
 
     - name: Run example
-      run: cargo +1.87.0 run --example analyze_binary
+      run: cargo +1.87.0 run --example simple
