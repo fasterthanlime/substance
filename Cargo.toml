@@ -1,6 +1,6 @@
 [package]
 name = "substance"
-version = "0.5.0"
+version = "0.6.0"
 description = "Analyze the size composition of binaries by examining symbols and mapping them to crates."
 categories = ["development-tools", "parsing"]
 repository = "https://github.com/fasterthanlime/substance"
