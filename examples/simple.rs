@@ -1,7 +1,7 @@
 use camino::Utf8PathBuf;
 use itertools::Itertools;
 use owo_colors::OwoColorize;
-use substance::{CrateName, NumberOfCopies};
+use substance::{ByteSize, CrateName, DemangledSymbolWithoutHash, NumberOfCopies};
 
 fn main() -> Result<(), eyre::Error> {
     env_logger::init();
@@ -87,14 +87,14 @@ fn main() -> Result<(), eyre::Error> {
     println!();
     println!(
         "{}",
-        "💫 Top 10 crates by number of symbols".purple().bold()
+        "💫 Top 20 crates by number of symbols".purple().bold()
     );
     for (i, krate) in context
         .crates
         .iter()
         .sorted_by_key(|c| -(c.symbols.len() as isize))
         .enumerate()
-        .take(10)
+        .take(20)
     {
         println!(
             "{}. {} ({} {})",
@@ -102,6 +102,35 @@ fn main() -> Result<(), eyre::Error> {
             krate.name.cyan().bold(),
             krate.symbols.len().blue(),
             "symbols".bright_black()
+        );
+    }
+
+    println!();
+    println!(
+        "{}",
+        "📦 Top 20 crates by binary size (sum of symbol sizes)"
+            .purple()
+            .bold()
+    );
+
+    // Prepare vector of (crate, total symbol size) tuples (sum over symbols)
+    let mut crate_sizes = context
+        .crates
+        .iter()
+        .map(|krate| {
+            let total_size: u64 = krate.symbols.values().map(|s| s.size.value()).sum();
+            (krate, total_size)
+        })
+        .sorted_by_key(|&(_, size)| -(size as i64))
+        .take(20)
+        .collect::<Vec<_>>();
+
+    for (i, (krate, size)) in crate_sizes.into_iter().enumerate() {
+        println!(
+            "{}. {} - {}",
+            (i + 1).yellow(),
+            krate.name.cyan().bold(),
+            format_bytes(size).bright_green(),
         );
     }
 
@@ -135,29 +164,84 @@ fn main() -> Result<(), eyre::Error> {
     println!();
     println!("{}", "🏋️  Top 20 largest symbols by size".purple().bold());
 
-    // Gather every symbol from every non-stdlib crate with its size
-    let mut all_symbols = Vec::new();
+    struct AggregateSymbol {
+        pub name: DemangledSymbolWithoutHash,
+        pub size: ByteSize,
+        pub copies: NumberOfCopies,
+        pub crates: HashSet<CrateName>,
+    }
+
+    // Gather every symbol from every non-stdlib crate and aggregate by hashless demangled name
+    let mut symbol_map: std::collections::HashMap<DemangledSymbolWithoutHash, AggregateSymbol> =
+        std::collections::HashMap::new();
+    use std::collections::HashSet;
     for krate in &context.crates {
         if std_crates.contains(&krate.name) {
             continue; // Skip standard library crates
         }
         for sym in krate.symbols.values() {
-            all_symbols.push((&krate.name, &sym.name, sym.size));
+            let hashless = sym.name.strip_hash();
+            symbol_map
+                .entry(hashless.clone())
+                .and_modify(|agg| {
+                    agg.size = ByteSize::new(agg.size.value() + sym.size.value());
+                    agg.copies = NumberOfCopies::new(agg.copies.value() + 1);
+                    agg.crates.insert(krate.name.clone());
+                })
+                .or_insert_with(|| AggregateSymbol {
+                    name: hashless.clone(),
+                    size: sym.size,
+                    copies: NumberOfCopies::new(1_usize),
+                    crates: {
+                        let mut hs = HashSet::new();
+                        hs.insert(krate.name.clone());
+                        hs
+                    },
+                });
         }
     }
+    let all_symbols: Vec<_> = symbol_map
+        .values()
+        .map(|agg| {
+            // Show all crate names that define the symbol
+            (
+                agg.crates.iter().cloned().collect::<Vec<_>>(),
+                &agg.name,
+                agg.size,
+                agg.copies,
+            )
+        })
+        .collect();
 
-    for (i, (crate_name, symbol_name, size)) in all_symbols
+    for (i, (crate_names, symbol_name, size, copies)) in all_symbols
         .into_iter()
-        .sorted_by_key(|(_, _, s)| -(s.value() as i64))
+        .sorted_by_key(|(_, _, s, _)| -(s.value() as i64))
         .take(20)
         .enumerate()
     {
+        let crates_str = crate_names
+            .iter()
+            .map(|c| c.cyan().bold().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let copies_info = if copies.value() > 1 {
+            format!(
+                " ({} {})",
+                copies.value().bright_magenta(),
+                "copies".bright_magenta()
+            )
+        } else {
+            String::new()
+        };
+
         println!(
-            "{}. {} ({}) - {}",
+            "{}. {} ({}) - {}{}",
             (i + 1).yellow(),
             symbol_name.blue(),
-            crate_name.cyan().bold(),
-            format_bytes(size.value()).bright_green()
+            crates_str,
+            format_bytes(size.value()).bright_green(),
+            copies_info
         );
     }
 

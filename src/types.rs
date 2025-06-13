@@ -32,9 +32,41 @@ pub struct CrateName;
 #[braid]
 pub struct MangledSymbol;
 
-/// A fully demangled symbol name including crate path (e.g., "serde::ser::Serialize::serialize")
+/// A fully demangled symbol name including crate path (e.g., "ariadne::write::<impl ariadne::Report<S>>::write_for_stream::h8f6ced0befa72529")
 #[braid]
 pub struct DemangledSymbol;
+
+impl DemangledSymbol {
+    /// Removes a Rust symbol hash suffix of the form `::h[0-9a-f]{16}` from the demangled symbol,
+    /// if present, and returns a new DemangledSymbol with the hash removed.
+    ///
+    /// Example:
+    ///     "foo::bar::h9e2b8a2a7a115765" -> "foo::bar"
+    ///     "serde::ser::Serialize::serialize" (no hash) -> unchanged
+    pub fn strip_hash(&self) -> DemangledSymbolWithoutHash {
+        // Get the inner string representation
+        let s = self.as_str();
+        // Find the position of the hash suffix, if it matches ::h...
+        if let Some(hash_pos) = s.rfind("::h") {
+            // Check if the substring after ::h is exactly 16 lowercase hex digits
+            let suffix = &s[(hash_pos + 3)..];
+            if suffix.len() == 16
+                && suffix
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && c.is_ascii_lowercase() || c.is_ascii_digit())
+            {
+                // Truncate the string up to hash_pos
+                return DemangledSymbolWithoutHash::from(s[..hash_pos].to_string());
+            }
+        }
+        // No hash matched; return DemangledSymbolWithoutHash constructed from self
+        DemangledSymbolWithoutHash::from(s.to_string())
+    }
+}
+
+/// A fully demangled symbol name excluding the hash (e.g., "ariadne::write::<impl ariadne::Report<S>>::write_for_stream::h8f6ced0befa72529")
+#[braid]
+pub struct DemangledSymbolWithoutHash;
 
 /// The function/method name part of a symbol without the crate path (e.g., "serialize")
 #[braid]
