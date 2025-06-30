@@ -144,7 +144,7 @@ mod tests {
         ];
 
         for (llvm_line, expected_demangled) in test_cases {
-            println!("Testing line: {}", llvm_line);
+            println!("Testing line: {llvm_line}");
             let result = parse_function_name(llvm_line);
             assert!(
                 result.is_some(),
@@ -152,15 +152,12 @@ mod tests {
                 llvm_line
             );
             let demangled = result.unwrap();
-            println!("Got: {}", demangled);
-            println!("Expected: {}", expected_demangled);
+            println!("Got: {demangled}");
+            println!("Expected: {expected_demangled}");
             assert_eq!(
                 demangled.as_str(),
                 expected_demangled,
-                "Demangling mismatch for {}\nExpected: {}\nGot: {}",
-                llvm_line,
-                expected_demangled,
-                demangled
+                "Demangling mismatch for {llvm_line}\nExpected: {expected_demangled}\nGot: {demangled}"
             );
         }
     }

@@ -171,7 +171,7 @@ fn show_report(context: &BuildContext) -> eyre::Result<()> {
             "{}. {} - {}",
             (i + 1).yellow(),
             krate.name.cyan().bold(),
-            format!("{:.2}s", seconds).bright_blue(),
+            format!("{seconds:.2}s").bright_blue(),
         );
     }
 
@@ -328,9 +328,9 @@ fn show_diff(baseline: &BuildContext, current: &BuildContext) -> eyre::Result<()
         if delta.abs() < 0.01 {
             "≈0%".to_string()
         } else if delta > 0.0 {
-            format!("🔺 +{:.2}%", delta).bright_red().to_string()
+            format!("🔺 +{delta:.2}%").bright_red().to_string()
         } else {
-            format!("🔻 {:.2}%", delta).bright_green().to_string()
+            format!("🔻 {delta:.2}%").bright_green().to_string()
         }
     };
 
@@ -516,7 +516,7 @@ fn show_diff(baseline: &BuildContext, current: &BuildContext) -> eyre::Result<()
             };
 
             println!("  {}::{}", crate_name.cyan().bold(), symbol_name.blue());
-            println!("      size : {}", line);
+            println!("      size : {line}");
         }
     }
 
@@ -587,7 +587,7 @@ fn show_diff(baseline: &BuildContext, current: &BuildContext) -> eyre::Result<()
 
         for ((crate_name, fn_name), old_ln, new_ln, pct_chg) in fn_changes {
             let line = if old_ln == 0 && new_ln > 0 {
-                format!("added ({} lines)", new_ln)
+                format!("added ({new_ln} lines)")
             } else if old_ln > 0 && new_ln == 0 {
                 "removed".to_string()
             } else {
@@ -595,7 +595,7 @@ fn show_diff(baseline: &BuildContext, current: &BuildContext) -> eyre::Result<()
             };
 
             println!("  {}::{}", crate_name.cyan().bold(), fn_name.blue());
-            println!("      lines: {}", line);
+            println!("      lines: {line}");
         }
     }
 

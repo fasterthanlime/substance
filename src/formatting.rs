@@ -27,7 +27,7 @@ pub fn format_bytes(bytes: u64) -> String {
     } else if bytes >= KIB {
         format!("{:.2} KiB", bytes as f64 / KIB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -48,9 +48,9 @@ pub fn format_size_diff(diff: i64) -> String {
         let abs_diff = diff.unsigned_abs();
         let formatted = format_bytes(abs_diff);
         if diff > 0 {
-            format!("+{}", formatted)
+            format!("+{formatted}")
         } else {
-            format!("-{}", formatted)
+            format!("-{formatted}")
         }
     }
 }
@@ -83,7 +83,7 @@ pub fn format_size_diff_styled(diff: i64) -> String {
 /// assert_eq!(format_percentage(100.0), "100.0%");
 /// ```
 pub fn format_percentage(value: f64) -> String {
-    format!("{:.1}%", value)
+    format!("{value:.1}%")
 }
 
 /// Format a percentage change with sign
@@ -98,9 +98,9 @@ pub fn format_percentage(value: f64) -> String {
 /// ```
 pub fn format_percentage_change(value: f64) -> String {
     if value > 0.0 {
-        format!("+{:.1}%", value)
+        format!("+{value:.1}%")
     } else {
-        format!("{:.1}%", value)
+        format!("{value:.1}%")
     }
 }
 
@@ -130,9 +130,9 @@ pub fn format_duration(duration: &Duration) -> String {
 /// ```
 pub fn format_duration_diff(diff: f64) -> String {
     if diff > 0.0 {
-        format!("+{:.2}s", diff)
+        format!("+{diff:.2}s")
     } else {
-        format!("{:.2}s", diff)
+        format!("{diff:.2}s")
     }
 }
 
@@ -148,9 +148,9 @@ pub fn format_duration_diff(diff: f64) -> String {
 /// ```
 pub fn format_count(count: usize, singular: &str) -> String {
     if count == 1 {
-        format!("{} {}", count, singular)
+        format!("{count} {singular}")
     } else {
-        format!("{} {}s", count, singular)
+        format!("{count} {singular}s")
     }
 }
 

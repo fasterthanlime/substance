@@ -11,29 +11,29 @@ pub(crate) fn stdlibs_dir() -> Result<camino::Utf8PathBuf, SubstanceError> {
         .arg("target-libdir")
         .output()
         .map_err(|e| {
-            log::error!("Failed to execute rustc: {}", e);
+            log::error!("Failed to execute rustc: {e}");
             SubstanceError::RustcFailed
         })?;
 
     // Handle potential non-UTF8 output gracefully, rather than panicking.
     // If it's not valid UTF-8, it's likely an issue with rustc's output itself.
     let stdout = std::str::from_utf8(&output.stdout).map_err(|e| {
-        log::error!("rustc output is not valid UTF-8: {}", e);
+        log::error!("rustc output is not valid UTF-8: {e}");
         SubstanceError::RustcFailed // Use an existing error variant if `InvalidUtf8` isn't available
     })?;
 
     // Use camino::Utf8PathBuf directly, as expected by SubstanceError::StdDirNotFound
     let rustlib = Utf8PathBuf::from(stdout.trim());
 
-    log::debug!("Found rustlib path: {:?}", rustlib);
+    log::debug!("Found rustlib path: {rustlib:?}");
 
     if !rustlib.exists() {
-        log::error!("Stdlib directory not found: {:?}", rustlib);
+        log::error!("Stdlib directory not found: {rustlib:?}");
         // This line caused the type mismatch, now `rustlib` is Utf8PathBuf
         return Err(SubstanceError::StdDirNotFound(rustlib));
     }
 
-    log::info!("Successfully located stdlib directory: {:?}", rustlib);
+    log::info!("Successfully located stdlib directory: {rustlib:?}");
     Ok(rustlib)
 }
 

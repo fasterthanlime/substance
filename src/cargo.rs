@@ -80,12 +80,12 @@ impl fmt::Display for CargoMessageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use CargoMessageError::*;
         match self {
-            UnknownReason(reason) => write!(f, "Unknown cargo message reason: {}", reason),
-            MissingTarget { reason } => write!(f, "Missing target for {}", reason),
+            UnknownReason(reason) => write!(f, "Unknown cargo message reason: {reason}"),
+            MissingTarget { reason } => write!(f, "Missing target for {reason}"),
             MissingDuration => write!(f, "Missing duration for timing-info"),
             MissingCrateName => write!(f, "Missing crate name for compiler-artifact"),
             MissingFilenames => write!(f, "Missing filenames for compiler-artifact"),
-            InvalidJson(err) => write!(f, "Failed to parse cargo message JSON: {}", err),
+            InvalidJson(err) => write!(f, "Failed to parse cargo message JSON: {err}"),
         }
     }
 }

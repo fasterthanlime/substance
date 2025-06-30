@@ -94,11 +94,10 @@ impl BuildRunner {
             let hash_val = hasher.finish();
 
             let base_target_dir = Utf8PathBuf::from(dir);
-            let target_dir = base_target_dir.join(format!("{:016x}", hash_val));
+            let target_dir = base_target_dir.join(format!("{hash_val:016x}"));
 
             info!(
-                "Using SUBSTANCE_TMP_DIR as target directory: {} (mixed with manifest hash)",
-                target_dir
+                "Using SUBSTANCE_TMP_DIR as target directory: {target_dir} (mixed with manifest hash)"
             );
             Self {
                 manifest_path,
@@ -153,8 +152,8 @@ impl BuildRunner {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
-                error!("Failed to execute cargo: {}", e);
-                SubstanceError::CargoError(format!("Failed to execute cargo: {}", e))
+                error!("Failed to execute cargo: {e}");
+                SubstanceError::CargoError(format!("Failed to execute cargo: {e}"))
             })?;
 
         use std::io::{BufRead, BufReader};
@@ -181,12 +180,12 @@ impl BuildRunner {
                 let msg = match CargoMessage::parse(&line) {
                     Ok(msg) => msg,
                     Err(err) => {
-                        eprintln!("Failed to parse cargo message: {}.\nLine: {}", err, line);
+                        eprintln!("Failed to parse cargo message: {err}.\nLine: {line}");
                         continue;
                     }
                 };
                 let Some(msg) = msg else {
-                    eprintln!("Received cargo JSON message: {}", line);
+                    eprintln!("Received cargo JSON message: {line}");
                     continue;
                 };
 
@@ -241,14 +240,14 @@ impl BuildRunner {
         let stderr_handle = thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                eprintln!("{}", line);
+                eprintln!("{line}");
             }
         });
 
         // Wait for the command to finish
         let status = cmd.wait().map_err(|e| {
-            error!("Failed to wait for cargo: {}", e);
-            SubstanceError::CargoError(format!("Failed to wait for cargo: {}", e))
+            error!("Failed to wait for cargo: {e}");
+            SubstanceError::CargoError(format!("Failed to wait for cargo: {e}"))
         })?;
 
         let wall_duration = before_build.elapsed();
@@ -258,7 +257,7 @@ impl BuildRunner {
         let _ = stderr_handle.join();
 
         if !status.success() {
-            error!("Cargo build failed with status: {:?}", status);
+            error!("Cargo build failed with status: {status:?}");
             // Stderr was already streamed, so we don't print it again here
             return Err(SubstanceError::CargoBuildFailed);
         }
@@ -503,8 +502,7 @@ pub fn find_llvm_ir_files(root_dir: &Utf8Path) -> Result<Vec<Utf8PathBuf>, Subst
     for entry in walker {
         let entry = entry.map_err(|e| {
             SubstanceError::CargoError(format!(
-                "Error iterating directory during search for .ll files: {}",
-                e
+                "Error iterating directory during search for .ll files: {e}"
             ))
         })?;
         let path = entry.path();
