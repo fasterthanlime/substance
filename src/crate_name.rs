@@ -73,40 +73,38 @@ fn parse_sym(d: &BuildContext, sym: &str) -> (String, bool) {
         // <T as core::fmt::Display>::fmt::h92003a61120a7e1a
         if crate_name1.is_empty() {
             crate_name2
+        } else if crate_name1 == crate_name2 {
+            crate_name1
         } else {
-            if crate_name1 == crate_name2 {
-                crate_name1
-            } else {
-                // This is an uncertain case.
-                //
-                // Example:
-                // <euclid::rect::TypedRect<f64> as resvg::geom::RectExt>::x
-                //
-                // Here we defined and instanced the `RectExt` trait
-                // in the `resvg` crate, but the first crate is `euclid`.
-                // Usually, those traits will be present in `deps_symbols`
-                // so they will be resolved automatically, in other cases it's an UB.
+            // This is an uncertain case.
+            //
+            // Example:
+            // <euclid::rect::TypedRect<f64> as resvg::geom::RectExt>::x
+            //
+            // Here we defined and instanced the `RectExt` trait
+            // in the `resvg` crate, but the first crate is `euclid`.
+            // Usually, those traits will be present in `deps_symbols`
+            // so they will be resolved automatically, in other cases it's an UB.
 
-                if let Some(names) = d.deps_symbols.get_vec(sym) {
-                    if names.contains(&CrateName::from(crate_name1.clone())) {
-                        crate_name1
-                    } else if names.contains(&CrateName::from(crate_name2.clone())) {
-                        crate_name2
-                    } else {
-                        // Example:
-                        // <std::collections::hash::map::DefaultHasher as core::hash::Hasher>::finish
-                        // ["cc", "cc", "fern", "fern", "svgdom", "svgdom"]
-
-                        is_exact = false;
-                        crate_name1
-                    }
+            if let Some(names) = d.deps_symbols.get_vec(sym) {
+                if names.contains(&CrateName::from(crate_name1.clone())) {
+                    crate_name1
+                } else if names.contains(&CrateName::from(crate_name2.clone())) {
+                    crate_name2
                 } else {
-                    // If the symbol is not in `deps_symbols` then it probably
-                    // was imported/inlined to the crate bin itself.
+                    // Example:
+                    // <std::collections::hash::map::DefaultHasher as core::hash::Hasher>::finish
+                    // ["cc", "cc", "fern", "fern", "svgdom", "svgdom"]
 
                     is_exact = false;
                     crate_name1
                 }
+            } else {
+                // If the symbol is not in `deps_symbols` then it probably
+                // was imported/inlined to the crate bin itself.
+
+                is_exact = false;
+                crate_name1
             }
         }
     } else {
@@ -223,7 +221,7 @@ pub fn extract_crate_from_function(func_name: &LlvmFunctionNameRef) -> String {
             && part.chars().all(|c| c.is_alphanumeric() || c == '_')
         {
             // Check if this looks like a crate name (not a type or function)
-            if !part.chars().next().map_or(false, |c| c.is_uppercase()) {
+            if !part.chars().next().is_some_and(|c| c.is_uppercase()) {
                 return part.to_string();
             }
         }

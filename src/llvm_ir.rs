@@ -32,7 +32,7 @@ pub fn analyze_llvm_ir_from_target_dir(
         .par_iter()
         .map(|ll_file| {
             let data = std::fs::read(ll_file)
-                .map_err(|_| SubstanceError::OpenFailed(ll_file.clone().into()))?;
+                .map_err(|_| SubstanceError::OpenFailed(ll_file.clone()))?;
             Ok(analyze_llvm_ir_data(&data))
         })
         .collect();

@@ -125,7 +125,7 @@ impl CargoMessage {
                     .filenames
                     .ok_or(CargoMessageError::MissingFilenames)?
                     .into_iter()
-                    .map(|s| Utf8PathBuf::from(s))
+                    .map(Utf8PathBuf::from)
                     .collect();
                 Ok(Some(CargoMessage::CompilerArtifact(CompilerArtifact {
                     crate_name,

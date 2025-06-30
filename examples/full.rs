@@ -148,7 +148,7 @@ fn show_report(context: &BuildContext) -> eyre::Result<()> {
         );
     }
 
-    let std_crates: Vec<CrateName> = context.std_crates.iter().cloned().collect();
+    let std_crates: Vec<CrateName> = context.std_crates.to_vec();
 
     println!();
     println!("{}", "⏰ Top 20 crates by build time".purple().bold());

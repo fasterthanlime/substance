@@ -45,7 +45,7 @@ pub fn format_size_diff(diff: i64) -> String {
     if diff == 0 {
         "no change".to_string()
     } else {
-        let abs_diff = diff.abs() as u64;
+        let abs_diff = diff.unsigned_abs();
         let formatted = format_bytes(abs_diff);
         if diff > 0 {
             format!("+{}", formatted)

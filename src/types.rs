@@ -153,9 +153,9 @@ impl BuildContext {
                     .entry(hashless.clone())
                     .and_modify(|agg| {
                         // Accumulate size
-                        agg.total_size = agg.total_size + sym.size;
+                        agg.total_size += sym.size;
                         // Count another copy of the symbol
-                        agg.copies = agg.copies + NumberOfCopies(1);
+                        agg.copies += NumberOfCopies(1);
                         // Track which crate this copy came from
                         agg.crates.insert(krate.name.clone());
                     })
@@ -190,9 +190,9 @@ impl BuildContext {
                     .entry(fname.clone())
                     .and_modify(|agg| {
                         // Accumulate LLVM IR line count
-                        agg.total_llvm_lines = agg.total_llvm_lines + func.lines;
+                        agg.total_llvm_lines += func.lines;
                         // Count another copy
-                        agg.copies = agg.copies + func.copies;
+                        agg.copies += func.copies;
                         // Track which crate
                         agg.crates.insert(krate.name.clone());
                     })
