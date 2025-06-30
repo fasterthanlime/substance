@@ -1,3 +1,4 @@
+use owo_colors::OwoColorize;
 pub use types::*;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -142,14 +143,6 @@ impl BuildRunner {
 
         let mut cmd = self.build_command();
 
-        // Log the full command and important envs
-        let rustflags = "--emit=llvm-ir -Cstrip=none";
-        info!("Executing cargo command: {:?}", cmd);
-        info!(
-            "Command environment: RUSTFLAGS='{}' RUSTC_BOOTSTRAP='1'",
-            rustflags
-        );
-
         // Execute the build and forward stdout/stderr to the parent's stdout/stderr as it happens,
         // using two threads, but only collect JSON lines from stdout.
 
@@ -188,11 +181,14 @@ impl BuildRunner {
                 let msg = match CargoMessage::parse(&line) {
                     Ok(msg) => msg,
                     Err(err) => {
-                        eprintln!("Failed to parse cargo message: {}", err);
+                        eprintln!("Failed to parse cargo message: {}.\nLine: {}", err, line);
                         continue;
                     }
                 };
-                let Some(msg) = msg else { continue };
+                let Some(msg) = msg else {
+                    eprintln!("Received cargo JSON message: {}", line);
+                    continue;
+                };
 
                 match msg {
                     CargoMessage::TimingInfo(timing_info) => {
@@ -244,10 +240,8 @@ impl BuildRunner {
         // Thread for stderr: print to parent's stderr, but DO NOT collect lines.
         let stderr_handle = thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    eprintln!("{}", line);
-                }
+            for line in reader.lines().map_while(Result::ok) {
+                eprintln!("{}", line);
             }
         });
 
@@ -325,17 +319,17 @@ impl BuildRunner {
         let file_metadata = std::fs::metadata(&binary_artifact.path)
             .map_err(|_| SubstanceError::OpenFailed(binary_artifact.path.clone()))?;
         let file_size = ByteSize::new(file_metadata.len());
-        info!("Binary file size: {} bytes", file_size.value());
+        info!("Binary file size: {} bytes", file_size.value().yellow());
 
         info!(
             "Collecting self data (.text section) from binary artifact: {}",
-            binary_artifact.path
+            binary_artifact.path.blue()
         );
         let raw_data = collect_self_data(&binary_artifact.path, ".text")?;
         let text_size = ByteSize::new(raw_data.text_size);
         debug!(
             "Collected self data for binary artifact (.text section size: {} bytes).",
-            text_size.value()
+            text_size.value().green()
         );
 
         let mut context = BuildContext {
@@ -351,20 +345,20 @@ impl BuildRunner {
         // Analyze LLVM IR (if any) for this crate from the target dir
         info!(
             "Analyzing LLVM IR files (if present) in target dir: {}",
-            self.target_dir
+            self.target_dir.blue()
         );
         let llvm_functions =
             analyze_llvm_ir_from_target_dir(&self.target_dir).unwrap_or_else(|err| {
                 warn!(
                     "Failed to analyze LLVM IR files: {}. Continuing without LLVM IR data.",
-                    err
+                    err.red()
                 );
                 HashMap::new()
             });
 
         info!(
             "LLVM IR analysis: found {} LLVM functions.",
-            llvm_functions.len()
+            llvm_functions.len().bright_purple()
         );
 
         // Compute build times per crate.
@@ -488,9 +482,9 @@ impl BuildRunner {
         cmd.arg(&self.manifest_path);
         cmd.arg("--target-dir");
         cmd.arg(&self.target_dir);
+        let rustflags = "--emit=llvm-ir -Cdebuginfo=line-tables-only -Cstrip=none";
 
         // Set environment variables for LLVM IR, timing, and Cstrip
-        let rustflags = "--emit=llvm-ir -Cstrip=none";
         cmd.env("RUSTFLAGS", rustflags);
         cmd.env("RUSTC_BOOTSTRAP", "1");
         // Force colored output in cargo/rustc even if not a tty
